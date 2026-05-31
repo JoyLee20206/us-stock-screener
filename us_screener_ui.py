@@ -5,19 +5,28 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import io
 import json
 import requests
 
 POSITIONS_FILE = Path("positions") / "positions.json"
 SCANS_DIR = Path("scans")
+TPE_TZ = timezone(timedelta(hours=8))   # 台北時間（UTC+8），Streamlit Cloud 跑在 UTC
+
+def now_tpe():
+    """回傳當下台北時間（naive datetime，方便顯示與相減）"""
+    return datetime.now(TPE_TZ).replace(tzinfo=None)
 
 st.set_page_config(page_title="美股量化選股終端機", page_icon="🇺🇸", layout="wide")
 CACHE_DIR = Path("cache")
 
 # 自定義美化 CSS
 st.markdown("""<style>
+    /* 縮減主畫面頂部留白 */
+    .block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+    /* 自訂緊湊型標題 */
+    .app-title { font-size: 1.6rem; font-weight: 700; margin: 0 0 0.5rem 0; line-height: 1.2; }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
@@ -27,11 +36,23 @@ st.markdown("""<style>
 def _read_parquet_cached(path_str: str, mtime_key: float):
     return pd.read_parquet(path_str)
 
-@st.cache_data(ttl=3600, show_spinner="正在從雲端下載市場資料（~15 MB）...")
+@st.cache_data(ttl=3600, show_spinner="正在從雲端下載市場資料（~15-25 MB）...")
 def _download_parquet_from_url(url: str):
+    """回傳 (DataFrame, 檔案最後更新時間 / 台北時區)"""
     resp = requests.get(url, timeout=120)
     resp.raise_for_status()
-    return pd.read_parquet(io.BytesIO(resp.content))
+    df = pd.read_parquet(io.BytesIO(resp.content))
+    # 嘗試從 HTTP header 抓取真實上傳時間
+    last_mod = resp.headers.get("Last-Modified")
+    if last_mod:
+        try:
+            from email.utils import parsedate_to_datetime
+            mtime = parsedate_to_datetime(last_mod).astimezone(TPE_TZ).replace(tzinfo=None)
+        except Exception:
+            mtime = now_tpe()
+    else:
+        mtime = now_tpe()
+    return df, mtime
 
 def load_stock_data():
     local_file = CACHE_DIR / "us_daily.parquet"
@@ -39,7 +60,8 @@ def load_stock_data():
         try:
             mtime_ts = local_file.stat().st_mtime
             df = _read_parquet_cached(str(local_file), mtime_ts)
-            return df, datetime.fromtimestamp(mtime_ts)
+            mtime_tpe = datetime.fromtimestamp(mtime_ts, TPE_TZ).replace(tzinfo=None)
+            return df, mtime_tpe
         except Exception as e:
             st.error(f"⚠️ 快取檔損毀：{e}")
             return None, None
@@ -53,8 +75,8 @@ def load_stock_data():
                  "請執行 fetch_cache_us.py，或在 Streamlit Cloud Secrets 設定 PARQUET_URL。")
         return None, None
     try:
-        df = _download_parquet_from_url(parquet_url)
-        return df, datetime.now()
+        df, mtime_tpe = _download_parquet_from_url(parquet_url)
+        return df, mtime_tpe
     except Exception as e:
         st.error(f"⚠️ 雲端資料下載失敗：{e}")
         return None, None
@@ -357,6 +379,9 @@ pass_score = st.sidebar.slider("最低總分 (滿分9分)", 1, 9, default_score,
          "計分項：型態(1) + 量增紅K(1) + 短期RS(1) + 乖離冷卻(1) + RS Rating(1) + U/D Ratio(1) + VCP(1) + Stage2(1) + PowerDay(1)")
 
 st.sidebar.markdown("---")
+run_scan = st.sidebar.button("🚀 執行量化掃描", type="primary", use_container_width=True)
+
+st.sidebar.markdown("---")
 st.sidebar.markdown("### 💾 持倉備份")
 _pos_now = load_positions()
 if _pos_now:
@@ -378,7 +403,7 @@ if _uploaded_pos is not None:
         st.sidebar.error(f"讀取失敗：{_e}")
 
 # --- Main Logic ---
-st.title("美股量化選股終端機")
+st.markdown('<div class="app-title">🇺🇸 美股量化選股終端機</div>', unsafe_allow_html=True)
 
 # === 大盤狀態紅綠燈 (CAN SLIM 的 M) ===
 market = get_market_status()
@@ -411,13 +436,13 @@ if df_daily is None:
     st.error("⚠️ 請先執行 fetch_cache_us.py 更新資料。"); st.stop()
 
 # 提示快取新鮮度
-age_hours = (datetime.now() - cache_mtime).total_seconds() / 3600
+age_hours = (now_tpe() - cache_mtime).total_seconds() / 3600
 if age_hours > 24:
     st.warning(f"⏰ 快取已過期 {age_hours:.1f} 小時（更新於 {cache_mtime:%Y-%m-%d %H:%M}），建議重跑 fetch_cache_us.py")
 else:
     st.caption(f"📅 快取更新於 {cache_mtime:%Y-%m-%d %H:%M}（{age_hours:.1f} 小時前）")
 
-if st.button("🚀 執行量化掃描"):
+if run_scan:
     with st.spinner("運算中..."):
         market_close = load_market_index("^GSPC")
 
@@ -632,11 +657,12 @@ if st.button("🚀 執行量化掃描"):
 
             # === F. 自動存檔供回測（檔名含時間戳+策略，避免同日覆寫）===
             SCANS_DIR.mkdir(exist_ok=True)
-            scan_filename = SCANS_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}_{strategy_mode}.parquet"
+            _now_tpe = now_tpe()
+            scan_filename = SCANS_DIR / f"{_now_tpe:%Y-%m-%d_%H%M%S}_{strategy_mode}.parquet"
             df_res_save = df_res.copy()
             df_res_save['mode'] = strategy_mode
-            df_res_save['scan_time'] = datetime.now().isoformat()
-            df_res_save['scan_date'] = datetime.now().strftime('%Y-%m-%d')
+            df_res_save['scan_time'] = _now_tpe.isoformat()
+            df_res_save['scan_date'] = _now_tpe.strftime('%Y-%m-%d')
             df_res_save.to_parquet(scan_filename)
             st.caption(f"💾 已存檔至 {scan_filename.name}（供回測模組使用）")
 
@@ -647,7 +673,7 @@ if st.button("🚀 執行量化掃描"):
             with col1:
                 buf = io.BytesIO()
                 with pd.ExcelWriter(buf, engine='openpyxl') as writer: df_res.to_excel(writer, index=False)
-                st.download_button("📥 下載 Excel 報表", buf.getvalue(), f"US_Scan_{datetime.now().strftime('%m%d')}.xlsx")
+                st.download_button("📥 下載 Excel 報表", buf.getvalue(), f"US_Scan_{now_tpe().strftime('%m%d')}.xlsx")
             with col2:
                 st.subheader("🏦 Firstrade 快速複製")
                 st.code(", ".join(df_res["代號"].tolist()), language="text")
@@ -668,7 +694,7 @@ with st.expander("📌 我的持倉", expanded=False):
         new_sid = pcols[0].text_input("代號", placeholder="例如 NVDA").strip().upper()
         new_entry_price = pcols[1].number_input("進場價", min_value=0.01, value=100.0, step=0.01, format="%.2f")
         new_shares = pcols[2].number_input("股數", min_value=1, value=10, step=1)
-        new_entry_date = pcols[3].date_input("進場日", value=datetime.now().date())
+        new_entry_date = pcols[3].date_input("進場日", value=now_tpe().date())
         new_stop = pcols[4].number_input("停損價(選填)", min_value=0.0, value=0.0, step=0.01, format="%.2f",
             help="留 0 = 自動用 -7% 鐵則。\n注意：實際生效停損 = max(你輸入的停損, 進場價×0.93)。"
                  "比 -7% 寬鬆的停損會被自動緊縮（Minervini 鐵則）。"
