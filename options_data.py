@@ -753,6 +753,48 @@ def compute_iv_rank(ticker: str, current_iv: float,
         return None
 
 
+def compute_rv_rank(ticker: str, df_daily: "pd.DataFrame | None" = None,
+                    window: int = 20, lookback_days: int = 252) -> dict | None:
+    """
+    用既有股價快取計算「實現波動率（Realized Volatility）Rank」。
+    在 IV 歷史資料累積足夠之前，這是 IV Rank 的近似替代品。
+
+    公式：
+        log_return = ln(close_t / close_{t-1})
+        RV = rolling std(log_return, window=20) × √252
+        RV Rank = (RV_now - RV_min_252d) / (RV_max_252d - RV_min_252d) × 100
+
+    Returns:
+        {'rank': 45.2, 'rv_now': 0.28, 'rv_min': 0.15, 'rv_max': 0.55, 'samples': 230}
+        或 None（資料不足）
+    """
+    if df_daily is None or len(df_daily) == 0:
+        return None
+    try:
+        sub = df_daily[df_daily["stock_id"] == ticker].copy()
+        if sub.empty or len(sub) < window + 10:
+            return None
+        sub = sub.sort_values("date").reset_index(drop=True)
+        sub["log_ret"] = np.log(sub["close"] / sub["close"].shift(1))
+        sub["rv"] = sub["log_ret"].rolling(window).std() * np.sqrt(252)
+        sub = sub.dropna(subset=["rv"]).tail(lookback_days)
+        if len(sub) < 10:
+            return None
+        rv_now = float(sub["rv"].iloc[-1])
+        rv_min = float(sub["rv"].min())
+        rv_max = float(sub["rv"].max())
+        if rv_max == rv_min:
+            return {"rank": 50.0, "rv_now": rv_now, "rv_min": rv_min,
+                    "rv_max": rv_max, "samples": len(sub)}
+        rank = (rv_now - rv_min) / (rv_max - rv_min) * 100
+        rank = max(0.0, min(100.0, rank))
+        return {"rank": round(rank, 1), "rv_now": round(rv_now, 4),
+                "rv_min": round(rv_min, 4), "rv_max": round(rv_max, 4),
+                "samples": len(sub)}
+    except Exception:
+        return None
+
+
 def iv_history_status(history_path: str | Path = "cache/iv_history.parquet") -> dict:
     """回傳 IV 累積進度，給 UI 顯示『累積中』訊息用"""
     from pathlib import Path as _P

@@ -1075,29 +1075,53 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
                 mcol3.metric("剩餘天數", f"{view['dte']} 天")
                 mcol4.metric("Call/Put 筆數", f"{len(view['calls'])} / {len(view['puts'])}")
 
-                # IV Rank（若有累積歷史）
+                # 波動率指標雙軌：IV Rank（真實，需累積） + RV Rank（估算，立即可用）
                 _atm_iv = None
                 if not view["calls"].empty:
                     _calls_view = view["calls"].copy()
                     _calls_view["_d"] = (_calls_view["strike"] - view["spot"]).abs()
                     _atm_row = _calls_view.sort_values("_d").iloc[0]
                     _atm_iv = float(_atm_row.get("impliedVolatility", 0) or 0)
+
                 iv_rank_info = opt.compute_iv_rank(opt_ticker, _atm_iv) if _atm_iv else None
-                if iv_rank_info and iv_rank_info.get("rank") is not None:
+                rv_rank_info = opt.compute_rv_rank(opt_ticker, df_daily)
+
+                # 決定要顯示哪個：IV Rank 累積 ≥ 30 天時優先用真實 IV，否則用 RV Rank 估算
+                _use_real_iv = (iv_rank_info and iv_rank_info.get("rank") is not None
+                                and iv_rank_info.get("samples", 0) >= 30)
+
+                if _use_real_iv:
                     r = iv_rank_info["rank"]
+                    _label = f"IV Rank（{iv_rank_info['samples']} 日歷史）"
                     if r >= 70:
-                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="🔥 偏貴", delta_color="inverse")
+                        mcol5.metric(_label, f"{r:.0f}%", delta="🔥 偏貴", delta_color="inverse",
+                                     help="真實 IV Rank：當前 IV 在歷史區間的百分位")
                     elif r >= 30:
-                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="中等")
+                        mcol5.metric(_label, f"{r:.0f}%", delta="中等",
+                                     help="真實 IV Rank：當前 IV 在歷史區間的百分位")
                     else:
-                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="✅ 便宜")
-                else:
+                        mcol5.metric(_label, f"{r:.0f}%", delta="✅ 便宜",
+                                     help="真實 IV Rank：當前 IV 在歷史區間的百分位")
+                elif rv_rank_info and rv_rank_info.get("rank") is not None:
+                    r = rv_rank_info["rank"]
                     iv_status = opt.iv_history_status()
-                    if iv_status["exists"] and iv_status["days"] > 0:
-                        mcol5.metric("IV Rank", "累積中",
-                                     delta=f"已 {iv_status['days']} 天")
+                    _days = iv_status["days"] if iv_status["exists"] else 0
+                    _label = "RV Rank（估算）"
+                    _help_text = (f"用過去 1 年的「實現波動率」算百分位，IV Rank 替代指標。"
+                                  f"\n當前 RV：{rv_rank_info['rv_now']*100:.1f}% "
+                                  f"(範圍 {rv_rank_info['rv_min']*100:.1f}%-{rv_rank_info['rv_max']*100:.1f}%)"
+                                  f"\nIV 歷史累積中（已 {_days} 天 / 需 30 天），"
+                                  f"累積完成後自動切換為真實 IV Rank。")
+                    if r >= 70:
+                        mcol5.metric(_label, f"{r:.0f}%", delta="🔥 偏貴", delta_color="inverse", help=_help_text)
+                    elif r >= 30:
+                        mcol5.metric(_label, f"{r:.0f}%", delta="中等", help=_help_text)
                     else:
-                        mcol5.metric("IV Rank", "—", delta="累積中")
+                        mcol5.metric(_label, f"{r:.0f}%", delta="✅ 便宜", help=_help_text)
+                else:
+                    mcol5.metric("波動率 Rank", "—",
+                                 delta="無資料",
+                                 help="該標的不在股價快取內，且 IV 歷史也未累積。")
 
                 # ⭐ 推薦合約
                 rec_c, rec_p = view.get("recommended_call"), view.get("recommended_put")
