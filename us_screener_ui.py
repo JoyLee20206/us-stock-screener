@@ -52,6 +52,17 @@ st.markdown("""<style>
         margin: 0.25rem 0 !important;
     }
     [data-testid="stAlert"] p { margin: 0 !important; line-height: 1.3 !important; }
+    /* 縮小 expander 內 markdown 標題字體（教學文件用） */
+    [data-testid="stExpander"] h1 { font-size: 1.4rem !important; margin: 0.6rem 0 0.4rem !important; }
+    [data-testid="stExpander"] h2 { font-size: 1.15rem !important; margin: 0.5rem 0 0.3rem !important; }
+    [data-testid="stExpander"] h3 { font-size: 1.05rem !important; margin: 0.4rem 0 0.2rem !important; }
+    [data-testid="stExpander"] p, [data-testid="stExpander"] li {
+        font-size: 0.92rem !important;
+        line-height: 1.5 !important;
+        margin: 0.25rem 0 !important;
+    }
+    [data-testid="stExpander"] table { font-size: 0.88rem !important; }
+    [data-testid="stExpander"] hr { margin: 0.6rem 0 !important; }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
