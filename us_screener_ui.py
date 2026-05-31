@@ -37,6 +37,12 @@ st.markdown("""<style>
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; line-height: 1.2 !important; }
     [data-testid="stMetricLabel"] { font-size: 0.85rem !important; }
     [data-testid="stMetricDelta"] { font-size: 0.8rem !important; }
+    /* 縮小 success / warning / error 提示橫條的內外邊距 */
+    [data-testid="stAlert"] {
+        padding: 0.4rem 0.75rem !important;
+        margin: 0.25rem 0 !important;
+    }
+    [data-testid="stAlert"] p { margin: 0 !important; line-height: 1.3 !important; }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
