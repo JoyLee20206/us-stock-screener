@@ -87,8 +87,9 @@
 │
 ├── us_screener_ui.py            # 主程式（Streamlit UI，雲端部署入口）
 ├── us_screener.py               # 舊版精簡版（已被 us_screener_ui.py 取代，保留參考）
-├── fetch_cache_us.py            # 美股每日資料抓取（GitHub Actions 每天自動執行）
-├── options_data.py              # 期權鏈抓取 + Black-Scholes Greeks + 智能標籤
+├── fetch_cache_us.py            # 美股每日股價快取（GitHub Actions 每天自動執行）
+├── fetch_iv_history.py          # 每日 IV snapshot 抓取（GitHub Actions 每天自動執行）
+├── options_data.py              # 期權鏈 + BS Greeks + 智能標籤 + 部位評估 + IV Rank
 ├── 期權新手指南.md              # 給沒接觸過期權的人看的入門教學（App 內可讀取）
 ├── requirements.txt             # Python 套件清單
 ├── README.md                    # 本檔案
@@ -96,8 +97,10 @@
 │
 ├── .github/
 │   └── workflows/
-│       └── fetch.yml            # GitHub Actions：每日 21:30 UTC（台灣 05:30）抓資料
-│                                #   → 上傳到 GitHub Releases (tag: data-cache)
+│       ├── fetch.yml            # GitHub Actions：每日 21:30 UTC（台灣 05:30）抓股價快取
+│       │                        #   → 上傳到 GitHub Releases (tag: data-cache)
+│       └── fetch_iv.yml         # GitHub Actions：每日 21:45 UTC（台灣 05:45）抓 IV snapshot
+│                                #   → 累積到 iv_history.parquet（同 Release tag）
 │
 ├── .streamlit/
 │   └── secrets.toml             # 本機秘鑰範本（不上傳，雲端在 App 設定貼入）

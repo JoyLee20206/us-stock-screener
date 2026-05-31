@@ -14,7 +14,7 @@ options_data.py — 美股期權鏈抓取 + Black-Scholes Greeks + 智能標籤
 from __future__ import annotations
 
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -238,6 +238,205 @@ def verdict(checklist: list[dict]) -> dict:
                 "msg": f"{warns} 項黃燈，整體勉強但非最佳選擇"}
     return {"light": "✅", "label": "GO",
             "msg": "通過買方進場 6 項檢查，可考慮下單（仍需依個人風控評估）"}
+
+
+# ============================================================
+# 期權持倉評估（P2 用）
+# ============================================================
+def evaluate_option_position(pos: dict, risk_free: float = 0.045) -> dict | None:
+    """
+    給定一筆期權持倉，回傳即時評估結果。
+
+    pos 結構：
+        {
+            'type': 'option',
+            'sid': 'NVDA',
+            'option_type': 'call' | 'put',
+            'strike': 150.0,
+            'expiration': '2026-06-20',
+            'premium': 5.30,           # 進場權利金（每股）
+            'contracts': 1,            # 口數
+            'entry_date': '2026-05-31',
+        }
+
+    回傳 dict 包含：sid、進場/現價/損益/Greeks/DTE/警示。
+    若找不到合約則 fallback 用 BS 估算。
+    """
+    try:
+        sid = pos.get("sid")
+        opt_type = pos.get("option_type", "call").lower()
+        strike = float(pos.get("strike", 0))
+        expiration = pos.get("expiration", "")
+        entry_premium = float(pos.get("premium", 0))
+        contracts = int(pos.get("contracts", 1))
+        entry_date = pos.get("entry_date", "")
+        if not (sid and strike and expiration and entry_premium):
+            return None
+
+        # 1. 抓現價
+        spot = get_spot_price(sid)
+        if spot is None:
+            return None
+
+        # 2. 抓當前合約價（從鏈裡找對應 strike）
+        current_premium = None
+        current_iv = None
+        oi = 0
+        try:
+            df_c, df_p = fetch_option_chain(sid, expiration)
+            df = df_c if opt_type == "call" else df_p
+            match = df[df["strike"] == strike]
+            if not match.empty:
+                row = match.iloc[0]
+                bid = float(row.get("bid", 0) or 0)
+                ask = float(row.get("ask", 0) or 0)
+                last = float(row.get("lastPrice", 0) or 0)
+                current_premium = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+                current_iv = float(row.get("impliedVolatility", 0) or 0)
+                oi = int(row.get("openInterest", 0) or 0)
+        except Exception:
+            pass
+
+        # 3. DTE
+        exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
+        today = date.today()
+        dte = (exp_date - today).days
+
+        # 4. 若鏈裡查不到，用 BS 估算（用進場 IV 反推或 fallback 30%）
+        if current_premium is None or current_premium <= 0:
+            # 嘗試用進場資料反推 IV（簡化：假設 IV 不變）
+            assumed_iv = current_iv if current_iv and current_iv > 0 else 0.30
+            current_premium = bs_price(opt_type, spot, strike, max(dte, 0), assumed_iv, risk_free)
+            current_iv = assumed_iv
+
+        # 5. Greeks（用當前 IV）
+        greeks = bs_greeks(opt_type, spot, strike, max(dte, 1),
+                           current_iv if current_iv > 0 else 0.30, risk_free)
+
+        # 6. 損益
+        pnl_per_share = current_premium - entry_premium
+        pnl_total = pnl_per_share * 100 * contracts
+        cost_total = entry_premium * 100 * contracts
+        return_pct = (pnl_per_share / entry_premium * 100) if entry_premium > 0 else 0.0
+
+        # 7. 盈虧平衡與內含/外含
+        if opt_type == "call":
+            break_even = strike + entry_premium
+            intrinsic = max(spot - strike, 0)
+        else:
+            break_even = strike - entry_premium
+            intrinsic = max(strike - spot, 0)
+        time_value = max(current_premium - intrinsic, 0)
+
+        # 8. 警示
+        alerts = []
+        if dte <= 0:
+            alerts.append("⏰ 已到期")
+        elif dte <= 7:
+            alerts.append("🚨 DTE≤7 建議平倉")
+        elif dte <= 14:
+            alerts.append("⚠️ DTE≤14 Theta 加速")
+
+        if return_pct <= -50:
+            alerts.append("🔴 觸發停損(-50%)")
+        elif return_pct <= -30:
+            alerts.append("🟡 虧損 -30%")
+
+        if return_pct >= 100:
+            alerts.append("🟢 達 +100% 可獲利了結")
+        elif return_pct >= 50:
+            alerts.append("🟢 +50% 可考慮減倉")
+
+        if intrinsic > 0:
+            alerts.append("💎 已 ITM")
+        if time_value > 0 and dte > 0:
+            tv_decay_per_day = abs(greeks.get("theta_per_day", 0))
+            if tv_decay_per_day * 7 > time_value * 0.5 and dte < 21:
+                alerts.append("⚡ 時間價值將快速燒完")
+
+        return {
+            "代號": sid,
+            "類型": f"{opt_type.upper()} ${strike:.2f}",
+            "到期": expiration,
+            "DTE": dte,
+            "口數": contracts,
+            "進場權利金": round(entry_premium, 2),
+            "現價": round(spot, 2),
+            "現權利金": round(current_premium, 2),
+            "盈虧/口($)": round(pnl_per_share * 100, 2),
+            "總損益($)": round(pnl_total, 2),
+            "成本($)": round(cost_total, 2),
+            "報酬%": round(return_pct, 1),
+            "盈虧平衡": round(break_even, 2),
+            "Delta": round(greeks["delta"], 3),
+            "Theta/天": round(greeks["theta_per_day"], 3),
+            "IV%": round(current_iv * 100, 1) if current_iv else 0.0,
+            "內含價值": round(intrinsic, 2),
+            "時間價值": round(time_value, 2),
+            "進場日": entry_date,
+            "警示": " ".join(alerts) if alerts else "✓ 正常",
+        }
+    except Exception as e:
+        return {"代號": pos.get("sid", "?"), "警示": f"⚠️ 評估失敗：{e}"}
+
+
+# ============================================================
+# 自動推薦：對選股結果批次產生 ⭐ 推薦合約
+# ============================================================
+def recommend_for_tickers(tickers: list[str], target_dte: int = 30,
+                          option_type: str = "call",
+                          risk_free: float = 0.045) -> list[dict]:
+    """
+    對一批 ticker，找出最接近 target_dte 的到期日，並回傳 ⭐ 推薦合約。
+
+    Returns: 每檔一筆 dict，包含 sid + 推薦 Call/Put 摘要 + 標籤。
+    找不到推薦時欄位留 None。
+    """
+    results = []
+    today = date.today()
+    for sid in tickers:
+        out = {"代號": sid, "推薦合約": None, "現價": None,
+               "到期": None, "DTE": None, "Δ": None, "權利金": None,
+               "盈虧平衡": None, "距現價%": None, "備註": ""}
+        try:
+            exps = list_expirations(sid)
+            if not exps:
+                out["備註"] = "無期權"
+                results.append(out)
+                continue
+            target = today + timedelta(days=target_dte)
+            deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days) for e in exps]
+            chosen_exp = exps[deltas.index(min(deltas))]
+
+            spot = get_spot_price(sid)
+            if spot is None:
+                out["備註"] = "無現價"
+                results.append(out)
+                continue
+            out["現價"] = round(spot, 2)
+            out["到期"] = chosen_exp
+
+            view = build_buyer_view(sid, chosen_exp, spot_price=spot, risk_free=risk_free)
+            if "error" in view:
+                out["備註"] = view["error"]
+                results.append(out)
+                continue
+
+            out["DTE"] = view["dte"]
+            rec = view.get(f"recommended_{option_type}")
+            if rec:
+                out["推薦合約"] = f"{option_type.upper()} ${rec['strike']:.2f}"
+                out["Δ"] = round(rec["delta"], 2)
+                out["權利金"] = round(rec["mid"], 2)
+                out["盈虧平衡"] = round(rec["break_even"], 2)
+                out["距現價%"] = round(rec["distance_pct"], 2)
+                out["備註"] = "⭐ 推薦"
+            else:
+                out["備註"] = "無 ⭐ 推薦（可手動到期權瀏覽查看其他標籤）"
+        except Exception as e:
+            out["備註"] = f"❌ {e}"
+        results.append(out)
+    return results
 
 
 def bs_greeks(option_type: str, S: float, K: float, T_days: float,
@@ -514,6 +713,66 @@ def build_buyer_view(ticker: str, expiration: str,
 # ============================================================
 # 顯示用：擷取常用欄位給 Streamlit DataFrame
 # ============================================================
+# ============================================================
+# IV Rank 計算（讀 fetch_iv_history.py 累積的歷史）
+# ============================================================
+def compute_iv_rank(ticker: str, current_iv: float,
+                    history_path: str | Path = "cache/iv_history.parquet",
+                    lookback_days: int = 252) -> dict | None:
+    """
+    根據歷史 IV 計算當前的 IV Rank（百分位）。
+
+    Returns:
+        {'rank': 35.2, 'iv_min': 0.18, 'iv_max': 0.62, 'samples': 87}
+        或 None（資料不足或檔案不存在）
+    """
+    from pathlib import Path as _P
+    p = _P(history_path)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        sub = df[df["ticker"] == ticker].copy()
+        if sub.empty:
+            return None
+        cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+        sub = sub[sub["date"] >= cutoff]
+        if len(sub) < 5:
+            return {"rank": None, "iv_min": None, "iv_max": None,
+                    "samples": len(sub), "note": "資料不足"}
+        iv_min = float(sub["iv"].min())
+        iv_max = float(sub["iv"].max())
+        if iv_max == iv_min:
+            return {"rank": 50.0, "iv_min": iv_min, "iv_max": iv_max,
+                    "samples": len(sub)}
+        rank = (current_iv - iv_min) / (iv_max - iv_min) * 100
+        rank = max(0, min(100, rank))
+        return {"rank": round(rank, 1), "iv_min": iv_min, "iv_max": iv_max,
+                "samples": len(sub)}
+    except Exception:
+        return None
+
+
+def iv_history_status(history_path: str | Path = "cache/iv_history.parquet") -> dict:
+    """回傳 IV 累積進度，給 UI 顯示『累積中』訊息用"""
+    from pathlib import Path as _P
+    p = _P(history_path)
+    if not p.exists():
+        return {"exists": False, "days": 0, "tickers": 0, "first_date": None, "last_date": None}
+    try:
+        df = pd.read_parquet(p)
+        return {
+            "exists": True,
+            "days": df["date"].nunique(),
+            "tickers": df["ticker"].nunique(),
+            "first_date": df["date"].min(),
+            "last_date": df["date"].max(),
+            "rows": len(df),
+        }
+    except Exception:
+        return {"exists": False, "days": 0, "tickers": 0, "first_date": None, "last_date": None}
+
+
 DISPLAY_COLS = ["label", "strike", "mid", "bid", "ask",
                 "delta", "theta_per_day", "iv_pct",
                 "break_even", "distance_pct",

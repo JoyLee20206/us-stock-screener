@@ -713,6 +713,30 @@ if run_scan:
             with col2:
                 st.subheader("🏦 Firstrade 快速複製")
                 st.code(", ".join(df_res["代號"].tolist()), language="text")
+
+            # ─── 對 Top N 產生期權建議（P2 #10）───
+            if OPTIONS_AVAILABLE:
+                st.markdown("---")
+                st.markdown("### 📈 對掃描結果產生期權買方建議")
+                rcols = st.columns([1, 1, 1, 3])
+                top_n = rcols[0].number_input("Top N 名", min_value=1, max_value=20,
+                                               value=min(5, len(df_res)), step=1,
+                                               key="opt_topn")
+                target_dte = rcols[1].number_input("目標 DTE", min_value=14, max_value=90,
+                                                    value=30, step=1, key="opt_target_dte",
+                                                    help="想看的到期天數，會挑最接近的到期日")
+                opt_direction = rcols[2].selectbox("方向", options=["call", "put"],
+                                                    key="opt_direction",
+                                                    help="看漲選 call，看跌選 put")
+                if rcols[3].button("🎯 批次查詢", type="primary", key="batch_opt_btn",
+                                    use_container_width=False):
+                    tickers = df_res["代號"].head(int(top_n)).tolist()
+                    with st.spinner(f"查詢 {len(tickers)} 檔的 ⭐ 推薦合約..."):
+                        recs = opt.recommend_for_tickers(tickers, target_dte=int(target_dte),
+                                                          option_type=opt_direction)
+                    df_recs = pd.DataFrame(recs)
+                    st.dataframe(df_recs, use_container_width=True, hide_index=True)
+                    st.caption("💡 想看完整鏈與風險分析，請到下方「🎯 期權瀏覽」輸入代號查詢。")
         else:
             st.warning("☹️ 無符合標的，請放寬條件。")
 
@@ -720,83 +744,179 @@ if run_scan:
 # 📌 D+E. 持倉管理
 # ============================================================
 st.divider()
-with st.expander("📌 我的持倉", expanded=False):
+with st.expander("📌 我的持倉（股票 + 期權）", expanded=False):
     positions = load_positions()
+    # 區分股票部位 vs 期權部位（向後相容：沒有 type 欄位視為 stock）
+    stock_positions = [p for p in positions if p.get("type", "stock") == "stock"]
+    option_positions = [p for p in positions if p.get("type") == "option"]
 
-    # 新增持倉表單
-    with st.form("add_position", clear_on_submit=True):
-        st.markdown("**新增持倉**")
-        pcols = st.columns([1.5, 1, 1, 1.2, 1, 1])
-        new_sid = pcols[0].text_input("代號", placeholder="例如 NVDA").strip().upper()
-        new_entry_price = pcols[1].number_input("進場價", min_value=0.01, value=100.0, step=0.01, format="%.2f")
-        new_shares = pcols[2].number_input("股數", min_value=1, value=10, step=1)
-        new_entry_date = pcols[3].date_input("進場日", value=now_tpe().date())
-        new_stop = pcols[4].number_input("停損價(選填)", min_value=0.0, value=0.0, step=0.01, format="%.2f",
-            help="留 0 = 自動用 -7% 鐵則。\n注意：實際生效停損 = max(你輸入的停損, 進場價×0.93)。"
-                 "比 -7% 寬鬆的停損會被自動緊縮（Minervini 鐵則）。"
-                 "若想設更緊停損（例如 -5%），輸入 進場價×0.95 即可生效。")
-        new_target = pcols[5].number_input("目標價(選填)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
-        st.caption("💡 停損會自動緊縮為「進場價 × 0.93（-7% 鐵則）」與「你輸入的停損」之較緊者。"
-                   "若想設定更緊停損，請直接輸入該價位。")
-        submitted = st.form_submit_button("➕ 加入持倉")
-        if submitted and new_sid:
-            positions.append({
-                "sid": new_sid,
-                "entry_price": float(new_entry_price),
-                "shares": int(new_shares),
-                "entry_date": new_entry_date.isoformat(),
-                "stop": float(new_stop) if new_stop > 0 else None,
-                "target": float(new_target) if new_target > 0 else None,
-            })
-            save_positions(positions)
-            st.success(f"✓ 已加入 {new_sid}")
-            st.rerun()
+    tab_stock, tab_option = st.tabs([
+        f"📈 股票持倉 ({len(stock_positions)})",
+        f"🎯 期權持倉 ({len(option_positions)})",
+    ])
 
-    # 顯示現有持倉
-    if not positions:
-        st.info("📭 目前沒有持倉。在上方表單新增。")
-    else:
-        # 預計算 RS Rating（複用 cache）
-        rs_ratings_for_pos = compute_rs_ratings(df_daily, cache_mtime.timestamp())
-        rows = []
-        missing_sids = []
-        for pos in positions:
-            r = evaluate_position(pos, df_daily, rs_ratings_for_pos)
-            if r:
-                rows.append(r)
-            else:
-                missing_sids.append(pos['sid'])
-
-        # [Fix 4] 缺失代號顯式警告
-        if missing_sids:
-            st.warning(f"⚠️ 以下持倉的代號在快取中找不到，無法評估："
-                       f"{', '.join(missing_sids)}（可能拼寫錯誤或已從指數移除）")
-
-        if rows:
-            df_pos = pd.DataFrame(rows)
-
-            # 彙總統計
-            total_alert = sum(1 for r in rows if "🔴" in r['警示'])
-            total_warn = sum(1 for r in rows if "🟡" in r['警示'] and "🔴" not in r['警示'])
-            avg_ret = df_pos['報酬%'].mean()
-            mcols = st.columns(4)
-            mcols[0].metric("持倉檔數", len(rows))
-            mcols[1].metric("平均報酬", f"{avg_ret:+.2f}%")
-            mcols[2].metric("🔴 嚴重警示", total_alert)
-            mcols[3].metric("🟡 一般警示", total_warn)
-
-            st.dataframe(df_pos, use_container_width=True, hide_index=True)
-
-            # 移除持倉
-            st.markdown("**移除持倉**")
-            del_sid = st.selectbox("選擇要移除的代號", options=[p['sid'] for p in positions], key="del_pos")
-            if st.button("🗑️ 移除"):
-                positions = [p for p in positions if p['sid'] != del_sid]
+    # ─── 股票持倉分頁 ───
+    with tab_stock:
+        with st.form("add_stock_position", clear_on_submit=True):
+            st.markdown("**新增股票持倉**")
+            pcols = st.columns([1.5, 1, 1, 1.2, 1, 1])
+            new_sid = pcols[0].text_input("代號", placeholder="例如 NVDA").strip().upper()
+            new_entry_price = pcols[1].number_input("進場價", min_value=0.01, value=100.0, step=0.01, format="%.2f")
+            new_shares = pcols[2].number_input("股數", min_value=1, value=10, step=1)
+            new_entry_date = pcols[3].date_input("進場日", value=now_tpe().date())
+            new_stop = pcols[4].number_input("停損價(選填)", min_value=0.0, value=0.0, step=0.01, format="%.2f",
+                help="留 0 = 自動用 -7% 鐵則。\n注意：實際生效停損 = max(你輸入的停損, 進場價×0.93)。"
+                     "比 -7% 寬鬆的停損會被自動緊縮（Minervini 鐵則）。"
+                     "若想設更緊停損（例如 -5%），輸入 進場價×0.95 即可生效。")
+            new_target = pcols[5].number_input("目標價(選填)", min_value=0.0, value=0.0, step=0.01, format="%.2f")
+            st.caption("💡 停損會自動緊縮為「進場價 × 0.93（-7% 鐵則）」與「你輸入的停損」之較緊者。")
+            submitted = st.form_submit_button("➕ 加入股票持倉")
+            if submitted and new_sid:
+                positions.append({
+                    "type": "stock",
+                    "sid": new_sid,
+                    "entry_price": float(new_entry_price),
+                    "shares": int(new_shares),
+                    "entry_date": new_entry_date.isoformat(),
+                    "stop": float(new_stop) if new_stop > 0 else None,
+                    "target": float(new_target) if new_target > 0 else None,
+                })
                 save_positions(positions)
-                st.success(f"✓ 已移除 {del_sid}")
+                st.success(f"✓ 已加入 {new_sid}")
                 st.rerun()
+
+        if not stock_positions:
+            st.info("📭 目前沒有股票持倉。在上方表單新增。")
         else:
-            st.warning("⚠️ 所有持倉的代號都不在快取中，無法評估。")
+            rs_ratings_for_pos = compute_rs_ratings(df_daily, cache_mtime.timestamp())
+            rows = []
+            missing_sids = []
+            for pos in stock_positions:
+                r = evaluate_position(pos, df_daily, rs_ratings_for_pos)
+                if r:
+                    rows.append(r)
+                else:
+                    missing_sids.append(pos['sid'])
+
+            if missing_sids:
+                st.warning(f"⚠️ 以下持倉的代號在快取中找不到："
+                           f"{', '.join(missing_sids)}（可能拼寫錯誤或已從指數移除）")
+
+            if rows:
+                df_pos = pd.DataFrame(rows)
+                total_alert = sum(1 for r in rows if "🔴" in r['警示'])
+                total_warn = sum(1 for r in rows if "🟡" in r['警示'] and "🔴" not in r['警示'])
+                avg_ret = df_pos['報酬%'].mean()
+                mcols = st.columns(4)
+                mcols[0].metric("持倉檔數", len(rows))
+                mcols[1].metric("平均報酬", f"{avg_ret:+.2f}%")
+                mcols[2].metric("🔴 嚴重警示", total_alert)
+                mcols[3].metric("🟡 一般警示", total_warn)
+
+                st.dataframe(df_pos, use_container_width=True, hide_index=True)
+
+                st.markdown("**移除股票持倉**")
+                del_sid = st.selectbox("選擇要移除的代號",
+                                       options=[p['sid'] for p in stock_positions],
+                                       key="del_stock_pos")
+                if st.button("🗑️ 移除", key="del_stock_btn"):
+                    positions = [p for p in positions
+                                 if not (p.get("type", "stock") == "stock" and p['sid'] == del_sid)]
+                    save_positions(positions)
+                    st.success(f"✓ 已移除 {del_sid}")
+                    st.rerun()
+
+    # ─── 期權持倉分頁 ───
+    with tab_option:
+        if not OPTIONS_AVAILABLE:
+            st.error(f"⚠️ 期權模組未載入：{_OPT_IMPORT_ERROR}")
+        else:
+            with st.form("add_option_position", clear_on_submit=True):
+                st.markdown("**新增期權持倉（買方部位）**")
+                ocols1 = st.columns([1.2, 1, 1.2, 1.2, 1, 1])
+                opt_new_sid = ocols1[0].text_input("代號", placeholder="例如 NVDA",
+                                                    key="opt_pos_sid").strip().upper()
+                opt_new_type = ocols1[1].selectbox("Call/Put", options=["call", "put"],
+                                                    key="opt_pos_type")
+                opt_new_strike = ocols1[2].number_input("行權價", min_value=0.01, value=100.0,
+                                                         step=0.50, format="%.2f", key="opt_pos_strike")
+                opt_new_exp = ocols1[3].text_input("到期日 (YYYY-MM-DD)",
+                                                    placeholder="例如 2026-06-20", key="opt_pos_exp")
+                opt_new_premium = ocols1[4].number_input("進場權利金/股", min_value=0.01, value=1.00,
+                                                          step=0.01, format="%.2f", key="opt_pos_prem",
+                                                          help="每股權利金（不是每口）。例：$5.30 表示一口成本 $530。")
+                opt_new_contracts = ocols1[5].number_input("口數", min_value=1, value=1, step=1,
+                                                            key="opt_pos_qty")
+                opt_new_entry = st.date_input("進場日", value=now_tpe().date(), key="opt_pos_date")
+                st.caption("💡 評估時系統會即時抓取當前 Bid/Ask 計算合約現值與 Greeks。"
+                           "若合約已失效（到期/下市），會用 Black-Scholes 估算。")
+                opt_submitted = st.form_submit_button("➕ 加入期權持倉")
+                if opt_submitted and opt_new_sid and opt_new_exp:
+                    try:
+                        datetime.strptime(opt_new_exp, "%Y-%m-%d")  # 驗證格式
+                        positions.append({
+                            "type": "option",
+                            "sid": opt_new_sid,
+                            "option_type": opt_new_type,
+                            "strike": float(opt_new_strike),
+                            "expiration": opt_new_exp,
+                            "premium": float(opt_new_premium),
+                            "contracts": int(opt_new_contracts),
+                            "entry_date": opt_new_entry.isoformat(),
+                        })
+                        save_positions(positions)
+                        st.success(f"✓ 已加入 {opt_new_sid} {opt_new_type.upper()} ${opt_new_strike} {opt_new_exp}")
+                        st.rerun()
+                    except ValueError:
+                        st.error("⚠️ 到期日格式錯誤，請用 YYYY-MM-DD（例如 2026-06-20）")
+
+            if not option_positions:
+                st.info("📭 目前沒有期權持倉。在上方表單新增。")
+            else:
+                if st.button("🔄 重新整理期權部位", key="refresh_opt_pos",
+                             help="重新抓取 yfinance 即時報價計算當前損益"):
+                    st.cache_data.clear()
+                    st.rerun()
+
+                with st.spinner("評估期權部位（抓取即時報價中）..."):
+                    opt_rows = []
+                    for pos in option_positions:
+                        r = opt.evaluate_option_position(pos)
+                        if r:
+                            opt_rows.append(r)
+                if opt_rows:
+                    df_opt = pd.DataFrame(opt_rows)
+
+                    # 彙總統計
+                    total_pnl = df_opt["總損益($)"].sum() if "總損益($)" in df_opt else 0
+                    total_cost = df_opt["成本($)"].sum() if "成本($)" in df_opt else 0
+                    avg_ret = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+                    urgent = sum(1 for r in opt_rows if "🚨" in str(r.get("警示", "")))
+                    profit_count = sum(1 for r in opt_rows if "🟢" in str(r.get("警示", "")))
+
+                    mcols = st.columns(4)
+                    mcols[0].metric("口數總計", df_opt["口數"].sum() if "口數" in df_opt else 0)
+                    mcols[1].metric("總損益", f"${total_pnl:+,.0f}",
+                                    delta_color="normal" if total_pnl >= 0 else "inverse")
+                    mcols[2].metric("加權報酬%", f"{avg_ret:+.1f}%")
+                    mcols[3].metric("🚨 緊急/🟢 達標", f"{urgent} / {profit_count}")
+
+                    st.dataframe(df_opt, use_container_width=True, hide_index=True)
+
+                    st.markdown("**移除期權持倉**")
+                    opt_labels = [f"{i}: {p['sid']} {p.get('option_type','?').upper()} "
+                                  f"${p.get('strike',0):.2f} {p.get('expiration','')}"
+                                  for i, p in enumerate(option_positions)]
+                    del_label = st.selectbox("選擇要移除的合約", options=opt_labels, key="del_opt_pos")
+                    if st.button("🗑️ 移除", key="del_opt_btn"):
+                        del_idx = int(del_label.split(":")[0])
+                        target = option_positions[del_idx]
+                        positions = [p for p in positions if p is not target]
+                        save_positions(positions)
+                        st.success("✓ 已移除")
+                        st.rerun()
+                else:
+                    st.warning("⚠️ 無法評估任何期權部位（可能合約已到期或代號錯誤）")
 
 # ============================================================
 # 📈 F. 績效回測
@@ -948,12 +1068,36 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
             if "error" in view:
                 st.error(f"⚠️ {view['error']}")
             else:
-                # 摘要列
-                mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                # 摘要列（含 IV Rank）
+                mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
                 mcol1.metric("標的現價", f"${view['spot']}")
                 mcol2.metric("到期日", view["expiration"])
                 mcol3.metric("剩餘天數", f"{view['dte']} 天")
                 mcol4.metric("Call/Put 筆數", f"{len(view['calls'])} / {len(view['puts'])}")
+
+                # IV Rank（若有累積歷史）
+                _atm_iv = None
+                if not view["calls"].empty:
+                    _calls_view = view["calls"].copy()
+                    _calls_view["_d"] = (_calls_view["strike"] - view["spot"]).abs()
+                    _atm_row = _calls_view.sort_values("_d").iloc[0]
+                    _atm_iv = float(_atm_row.get("impliedVolatility", 0) or 0)
+                iv_rank_info = opt.compute_iv_rank(opt_ticker, _atm_iv) if _atm_iv else None
+                if iv_rank_info and iv_rank_info.get("rank") is not None:
+                    r = iv_rank_info["rank"]
+                    if r >= 70:
+                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="🔥 偏貴", delta_color="inverse")
+                    elif r >= 30:
+                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="中等")
+                    else:
+                        mcol5.metric("IV Rank", f"{r:.0f}%", delta="✅ 便宜")
+                else:
+                    iv_status = opt.iv_history_status()
+                    if iv_status["exists"] and iv_status["days"] > 0:
+                        mcol5.metric("IV Rank", "累積中",
+                                     delta=f"已 {iv_status['days']} 天")
+                    else:
+                        mcol5.metric("IV Rank", "—", delta="累積中")
 
                 # ⭐ 推薦合約
                 rec_c, rec_p = view.get("recommended_call"), view.get("recommended_put")
