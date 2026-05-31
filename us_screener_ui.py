@@ -52,17 +52,29 @@ st.markdown("""<style>
         margin: 0.25rem 0 !important;
     }
     [data-testid="stAlert"] p { margin: 0 !important; line-height: 1.3 !important; }
-    /* 縮小 expander 內 markdown 標題字體（教學文件用） */
-    [data-testid="stExpander"] h1 { font-size: 1.4rem !important; margin: 0.6rem 0 0.4rem !important; }
-    [data-testid="stExpander"] h2 { font-size: 1.15rem !important; margin: 0.5rem 0 0.3rem !important; }
-    [data-testid="stExpander"] h3 { font-size: 1.05rem !important; margin: 0.4rem 0 0.2rem !important; }
-    [data-testid="stExpander"] p, [data-testid="stExpander"] li {
+    /* 縮小 expander / tab 內 markdown 標題字體（教學文件用） */
+    [data-testid="stExpander"] h1,
+    [data-baseweb="tab-panel"] h1 { font-size: 1.4rem !important; margin: 0.6rem 0 0.4rem !important; }
+    [data-testid="stExpander"] h2,
+    [data-baseweb="tab-panel"] h2 { font-size: 1.15rem !important; margin: 0.5rem 0 0.3rem !important; }
+    [data-testid="stExpander"] h3,
+    [data-baseweb="tab-panel"] h3 { font-size: 1.05rem !important; margin: 0.4rem 0 0.2rem !important; }
+    [data-testid="stExpander"] p, [data-testid="stExpander"] li,
+    [data-baseweb="tab-panel"] p, [data-baseweb="tab-panel"] li {
         font-size: 0.92rem !important;
         line-height: 1.5 !important;
         margin: 0.25rem 0 !important;
     }
-    [data-testid="stExpander"] table { font-size: 0.88rem !important; }
-    [data-testid="stExpander"] hr { margin: 0.6rem 0 !important; }
+    [data-testid="stExpander"] table,
+    [data-baseweb="tab-panel"] table { font-size: 0.88rem !important; }
+    [data-testid="stExpander"] hr,
+    [data-baseweb="tab-panel"] hr { margin: 0.6rem 0 !important; }
+    /* tab 列本身美化：字稍大、底線粗一點 */
+    [data-baseweb="tab-list"] button[data-baseweb="tab"] {
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+        padding: 0.5rem 1rem !important;
+    }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
@@ -761,10 +773,20 @@ if run_scan:
             st.warning("☹️ 無符合標的，請放寬條件。")
 
 # ============================================================
-# 📌 D+E. 持倉管理
+# 📑 將底部 4 個區塊整合成頁籤（類似 Excel sheet tabs）
 # ============================================================
 st.divider()
-with st.expander("📌 我的持倉（股票 + 期權）", expanded=False):
+_tab_pos, _tab_bt, _tab_edu, _tab_opt = st.tabs([
+    "📌 我的持倉",
+    "📈 績效回測",
+    "📚 期權新手教學",
+    "🎯 期權瀏覽（純買方視角）",
+])
+
+# ============================================================
+# 📌 D+E. 持倉管理
+# ============================================================
+with _tab_pos:
     positions = load_positions()
     # 區分股票部位 vs 期權部位（向後相容：沒有 type 欄位視為 stock）
     stock_positions = [p for p in positions if p.get("type", "stock") == "stock"]
@@ -953,8 +975,7 @@ with st.expander("📌 我的持倉（股票 + 期權）", expanded=False):
 # ============================================================
 # 📈 F. 績效回測
 # ============================================================
-st.divider()
-with st.expander("📈 績效回測", expanded=False):
+with _tab_bt:
     st.caption("讀取 scans/ 歷史掃描快照，分析訊號的後續表現。需累積至少 5-12 週的歷史快照才有統計意義。")
     st.info("☁️ 雲端版本：本次工作階段執行的掃描會自動記錄到 scans/，但 App 重啟後消失。"
             "建議每週將下方 Excel 報表存檔，日後可透過「上傳掃描快照」還原回測資料。")
@@ -1031,8 +1052,7 @@ with st.expander("📈 績效回測", expanded=False):
 # ============================================================
 # 📚 G. 期權新手教學
 # ============================================================
-st.divider()
-with st.expander("📚 期權新手教學（沒接觸過期權？從這裡開始）", expanded=False):
+with _tab_edu:
     if OPTIONS_GUIDE.exists():
         try:
             guide_md = OPTIONS_GUIDE.read_text(encoding="utf-8")
@@ -1045,8 +1065,7 @@ with st.expander("📚 期權新手教學（沒接觸過期權？從這裡開始
 # ============================================================
 # 🎯 H. 期權瀏覽（純買方視角）
 # ============================================================
-st.divider()
-with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
+with _tab_opt:
     if not OPTIONS_AVAILABLE:
         st.error(f"⚠️ 期權模組載入失敗：{_OPT_IMPORT_ERROR}。請確認 options_data.py 已隨專案部署。")
     else:
