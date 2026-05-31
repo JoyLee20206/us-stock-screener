@@ -471,12 +471,22 @@ df_daily, cache_mtime = load_stock_data()
 if df_daily is None:
     st.error("⚠️ 請先執行 fetch_cache_us.py 更新資料。"); st.stop()
 
-# 提示快取新鮮度
-age_hours = (now_tpe() - cache_mtime).total_seconds() / 3600
-if age_hours > 24:
-    st.warning(f"⏰ 快取已過期 {age_hours:.1f} 小時（更新於 {cache_mtime:%Y-%m-%d %H:%M}），建議重跑 fetch_cache_us.py")
-else:
-    st.caption(f"📅 快取更新於 {cache_mtime:%Y-%m-%d %H:%M}（{age_hours:.1f} 小時前）")
+# 提示快取新鮮度 + 強制刷新按鈕
+_cache_info_cols = st.columns([5, 1])
+with _cache_info_cols[0]:
+    age_hours = (now_tpe() - cache_mtime).total_seconds() / 3600
+    if age_hours > 24:
+        st.warning(f"⏰ 快取已過期 {age_hours:.1f} 小時（更新於 {cache_mtime:%Y-%m-%d %H:%M}），"
+                   f"建議重跑 fetch_cache_us.py。目前共 **{len(df_daily['stock_id'].unique())} 檔**")
+    else:
+        st.caption(f"📅 快取更新於 {cache_mtime:%Y-%m-%d %H:%M}（{age_hours:.1f} 小時前）"
+                   f"｜共 **{len(df_daily['stock_id'].unique())} 檔**")
+with _cache_info_cols[1]:
+    if st.button("🔄 刷新雲端資料", key="force_refresh",
+                 help="強制清除 Streamlit 快取，從 GitHub Releases 重新下載最新 parquet。"
+                      "通常在 GitHub Actions 剛跑完新版資料時使用。"):
+        st.cache_data.clear()
+        st.rerun()
 
 if run_scan:
     with st.spinner("運算中..."):
