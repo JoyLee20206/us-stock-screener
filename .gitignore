@@ -1,0 +1,9 @@
+cache/
+scans/
+positions/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+*.xlsx
+.DS_Store
+Thumbs.db
