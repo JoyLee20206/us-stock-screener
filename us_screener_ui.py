@@ -23,10 +23,16 @@ CACHE_DIR = Path("cache")
 
 # 自定義美化 CSS
 st.markdown("""<style>
-    /* 縮減主畫面頂部留白 */
-    .block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
-    /* 自訂緊湊型標題 */
-    .app-title { font-size: 1.6rem; font-weight: 700; margin: 0 0 0.5rem 0; line-height: 1.2; }
+    /* 縮減主畫面頂部留白（保留 2.5rem 避免被 Streamlit toolbar 蓋住）*/
+    .block-container { padding-top: 2.5rem !important; padding-bottom: 1rem !important; }
+    /* 自訂緊湊型標題 — color: inherit 確保深淺色主題都顯示 */
+    .app-title {
+        font-size: 1.6rem;
+        font-weight: 700;
+        margin: 0 0 0.75rem 0;
+        line-height: 1.2;
+        color: inherit;
+    }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
