@@ -195,27 +195,46 @@ def enrich_chain(df: pd.DataFrame, option_type: str, spot_price: float,
 # ============================================================
 def label_contract(row, option_type: str = "call") -> str:
     """
-    給單一合約打上一個主要標籤。
-    優先序：流動性差 > Theta黑洞 > 高IV > 太OTM > ITM穩 > 推薦 > 一般
+    給單一合約打上一個主要標籤，**每口都有明確分類**。
+
+    優先序（由上往下優先）：
+      1. ❓ 流動性差  (OI < 100)            → 排除：想出場沒人接
+      2. 💀 Theta 黑洞 (DTE < 14)            → 排除：時間損耗太快
+      3. 🔥 高 IV     (IV > 50%)             → 注意：進場貴、IV crush 風險
+      4. Delta 分級：
+         ⚠️ 太 OTM    Delta < 0.30          → 排除：中獎率低
+         🟡 略 OTM    0.30 ≤ Delta < 0.45   → 可看：性價比中等
+         ⭐ 推薦      0.45 ≤ Delta ≤ 0.65 + DTE 21-45  → 新手最適合
+         ⏱️ DTE 不對 同上 Delta 但 DTE 不在 21-45    → 可看：時間維度待調整
+         🟠 略 ITM    0.65 < Delta ≤ 0.70   → 可看：偏保守
+         💎 ITM 穩    Delta > 0.70          → 可看：貴但中獎率高
     """
     delta = abs(row.get("delta", 0)) if pd.notna(row.get("delta")) else 0
     dte = row.get("dte", 0)
     iv = row.get("impliedVolatility", 0) or 0
     oi = row.get("openInterest", 0) or 0
 
+    # 先排除地雷（無法繼續看）
     if oi < 100:
         return "❓ 流動性差"
     if dte < 14:
         return "💀 Theta 黑洞"
     if iv > 0.50:
         return "🔥 高 IV"
+
+    # 依 Delta 分級（DTE 已確認 >= 14）
     if delta < 0.30:
         return "⚠️ 太 OTM"
-    if delta > 0.70:
-        return "💎 ITM 穩"
-    if 0.45 <= delta <= 0.65 and 21 <= dte <= 45:
-        return "⭐ 推薦"
-    return "—"
+    if delta < 0.45:
+        return "🟡 略 OTM"
+    if delta <= 0.65:
+        # 進入「推薦 Delta 區」，再看 DTE 是否在新手甜蜜點
+        if 21 <= dte <= 45:
+            return "⭐ 推薦"
+        return "⏱️ DTE 不對"
+    if delta <= 0.70:
+        return "🟠 略 ITM"
+    return "💎 ITM 穩"
 
 
 def add_labels(df: pd.DataFrame, option_type: str = "call") -> pd.DataFrame:

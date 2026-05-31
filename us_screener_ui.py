@@ -966,7 +966,10 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
                     else:
                         rc2.info("📉 Put 端目前無符合條件的 ⭐ 推薦合約")
 
-                st.caption("📖 標籤說明：⭐推薦 / 💎ITM穩 / ⚠️太OTM / 🔥高IV / 💀Theta黑洞 / ❓流動性差")
+                st.caption(
+                    "📖 標籤說明（由優到劣）：⭐推薦 → 💎ITM穩 → 🟠略ITM → ⏱️DTE不對 → 🟡略OTM "
+                    "→ ⚠️太OTM / 🔥高IV / 💀Theta黑洞 / ❓流動性差"
+                )
 
                 # 完整鏈
                 tab_call, tab_put = st.tabs(["📈 Call 鏈", "📉 Put 鏈"])
