@@ -766,9 +766,17 @@ if run_scan:
                     with st.spinner(f"查詢 {len(tickers)} 檔的 ⭐ 推薦合約..."):
                         recs = opt.recommend_for_tickers(tickers, target_dte=int(target_dte),
                                                           option_type=opt_direction)
-                    df_recs = pd.DataFrame(recs)
-                    st.dataframe(df_recs, use_container_width=True, hide_index=True)
-                    st.caption("💡 想看完整鏈與風險分析，請到下方「🎯 期權瀏覽」輸入代號查詢。")
+                    st.session_state["batch_recs"] = pd.DataFrame(recs)
+                    st.session_state["batch_recs_key"] = (tuple(tickers), int(target_dte), opt_direction)
+
+                # 從 session_state 還原批次查詢結果（互動其他元件不會消失）
+                _batch_recs = st.session_state.get("batch_recs")
+                _batch_key = st.session_state.get("batch_recs_key")
+                _current_batch_key = (tuple(df_res["代號"].head(int(top_n)).tolist()),
+                                       int(target_dte), opt_direction)
+                if _batch_recs is not None and _batch_key == _current_batch_key:
+                    st.dataframe(_batch_recs, use_container_width=True, hide_index=True)
+                    st.caption("💡 想看完整鏈與風險分析，請切到「🎯 期權瀏覽」頁籤輸入代號查詢。")
         else:
             st.warning("☹️ 無符合標的，請放寬條件。")
 
@@ -841,6 +849,7 @@ with _tab_pos:
                     missing_sids.append(pos['sid'])
 
             if missing_sids:
+                missing_sids = sorted(set(missing_sids))   # 去重 + 排序
                 _all_cached = set(df_daily["stock_id"].unique())
                 _cache_size = len(_all_cached)
                 # 對找不到的代號，建議鄰近字母的相似代號（fuzzy）
