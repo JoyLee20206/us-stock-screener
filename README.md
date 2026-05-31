@@ -3,7 +3,7 @@
 基於 **CAN SLIM + Minervini + O'Neil** 三派經典方法論打造的美股量化選股系統。
 整合大盤健康度檢測、IBD 風格 RS Rating、VCP 收縮、Stage 2 突破、持倉警示與績效回測。
 
-資料來源為 **yfinance**，標的池為 **S&P 500 + NASDAQ 100 + 費城半導體 (SOX)** 三大指數成分股的聯集（去重後約 600 檔）。
+資料來源為 **yfinance**，標的池為 **S&P 500 + NASDAQ 100 + S&P MidCap 400 + 費城半導體 (SOX)** 四大指數成分股的聯集（去重後約 900 檔）。S&P MidCap 400 是 Minervini 風格的甜蜜點，市值 $40-150 億最容易出現 VCP 突破飆股。
 
 ---
 

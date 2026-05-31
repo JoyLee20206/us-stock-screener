@@ -46,6 +46,20 @@ def get_nasdaq100_tickers():
         print(f"   !!! NASDAQ 100 抓取失敗: {e}")
     return []
 
+def get_sp400_tickers():
+    print("🔍 抓取 S&P MidCap 400 成分股...")
+    try:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers)
+        tables = pd.read_html(StringIO(response.text))
+        for df in tables:
+            if 'Symbol' in df.columns:
+                return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
+    except Exception as e:
+        print(f"   !!! S&P 400 抓取失敗: {e}")
+    return []
+
 def get_sox_tickers():
     print("🔍 載入費城半導體 (SOX) 成分股...")
     return ["AMD", "ADI", "AMAT", "ARM", "ASML", "AVGO", "COHR", "ENTG", "GFS",
@@ -89,7 +103,7 @@ def main():
     today = pd.Timestamp.now().normalize()
 
     # === 1. 取得最新成分股清單 ===
-    tickers = list(set(get_sp500_tickers() + get_nasdaq100_tickers() + get_sox_tickers()))
+    tickers = list(set(get_sp500_tickers() + get_nasdaq100_tickers() + get_sp400_tickers() + get_sox_tickers()))
     tickers = sorted([t for t in tickers if isinstance(t, str) and t.strip()])
     print(f"\n📋 目標成分股共 {len(tickers)} 檔")
 
