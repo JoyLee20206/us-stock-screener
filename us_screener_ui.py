@@ -33,6 +33,10 @@ st.markdown("""<style>
         line-height: 1.2;
         color: inherit;
     }
+    /* 縮小大盤狀態 metric 區字體 */
+    [data-testid="stMetricValue"] { font-size: 1.4rem !important; line-height: 1.2 !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.85rem !important; }
+    [data-testid="stMetricDelta"] { font-size: 0.8rem !important; }
     .main { background-color: #f8f9fa; }
     .stButton>button { background-color: #007bff; color: white; border-radius: 8px; font-weight: bold; }
     .stDownloadButton>button { background-color: #28a745 !important; color: white !important; }
