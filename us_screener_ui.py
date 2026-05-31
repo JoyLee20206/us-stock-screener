@@ -1138,15 +1138,46 @@ with _tab_opt:
 
 ---
 
-#### ⚠️ 新手 5 大警示
+#### 🏷️ 智能標籤一覽表
 
-| 看到這個 → 別碰 |
-|------|
-| ⚠️ **太 OTM**（Delta < 0.30）— 90% 會歸零 |
-| 🔥 **高 IV**（IV > 50%）— 進場太貴 |
-| 💀 **Theta 黑洞**（DTE < 14 天）— 時間損耗快 |
-| ❓ **流動性差**（OI < 100）— 想出場沒人接 |
-| 🚨 **跨財報** — IV crush 風險，建議避開 |
+系統會對每口合約自動打上**一個主要標籤**幫你快速判斷。優先序：地雷 > Delta 分級。
+
+##### ✅ 可考慮的合約（由優到劣）
+
+| 標籤 | 條件 | 適合誰 |
+|------|------|--------|
+| ⭐ **推薦** | Δ 0.45-0.65 + DTE 21-45 天 | **新手首選**（性價比甜蜜點）|
+| 💎 **ITM 穩** | Δ > 0.70 | 想替代買股票、要高中獎率 |
+| 🟠 **略 ITM** | Δ 0.65-0.70 | 保守派、稍貴但穩 |
+| ⏱️ **DTE 不對** | Δ 對了（0.45-0.65）但 DTE 不在 21-45 | Delta OK 但時間軸要重挑 |
+| 🟡 **略 OTM** | Δ 0.30-0.45 | 性價比中等、想博更大槓桿 |
+
+##### ❌ 應避開的合約
+
+| 標籤 | 條件 | 為什麼避開 |
+|------|------|----------|
+| ⚠️ **太 OTM** | Δ < 0.30 | 中獎率低、90% 歸零 |
+| 🔥 **高 IV** | IV > 50% | 進場貴、財報前常見 IV crush |
+| 💀 **Theta 黑洞** | DTE < 14 天 | 時間損耗每天 5-10% |
+| ❓ **流動性差** | OI < 100 | 想出場可能沒人接 |
+| 🚨 **跨財報** | 合約跨越下次財報日 | IV crush 風險（單獨欄位顯示）|
+
+##### 標籤如何被決定？
+
+判定流程（**由上往下優先**）：
+```
+1. OI < 100         → ❓ 流動性差   （地雷一）
+2. DTE < 14         → 💀 Theta 黑洞 （地雷二）
+3. IV > 50%         → 🔥 高 IV     （地雷三）
+4. Delta < 0.30     → ⚠️ 太 OTM    （地雷四）
+5. Delta 0.30-0.45  → 🟡 略 OTM
+6. Delta 0.45-0.65 + DTE 21-45 → ⭐ 推薦
+7. Delta 0.45-0.65 + DTE 不對   → ⏱️ DTE 不對
+8. Delta 0.65-0.70  → 🟠 略 ITM
+9. Delta > 0.70     → 💎 ITM 穩
+```
+
+📅 **跨財報標籤**為**獨立欄位**，與上述標籤可同時出現。例如「⭐ 推薦 + 🚨 跨財報」表示性價比好但有 IV crush 風險。
 
 ---
 
@@ -1461,6 +1492,17 @@ with _tab_opt:
                     for ci, item in enumerate(checklist):
                         chk_cols[ci % 2].markdown(f"**{item['status']} {item['label']}**: {item['detail']}")
 
+                    # ─── 名詞解釋（緊接在風險檢查後）───
+                    with st.expander("💡 名詞解釋：Delta / Theta / IV / BE 是什麼？"):
+                        st.markdown("""
+- **Δ Delta**：股價 $1 變動 → 期權變多少。0.55 約等於「中獎機率 55%」。新手選 **0.45-0.65**。
+- **Θ Theta**：每過一天，期權跌多少（時間價值衰減）。**越接近 0 越好**。所以選 **DTE 21-45 天**，太短 Theta 吃光、太長資金占用。
+- **IV 隱含波動率**：市場對未來波動的預期。**IV 越高 → 期權越貴**。新手避開 IV > 50%。
+- **盈虧平衡點 (BE)**：到期股價要超過 BE 才賺錢。**Call BE = 行權價 + 權利金**；**Put BE = 行權價 - 權利金**。
+- **OI（Open Interest）未平倉量**：這口合約有多少張在市場上。**OI 大 = 流動性好、容易出場**。
+- **Bid/Ask 價差**：買賣價差。價差大代表你買進就賠掉滑價。買方要選價差 < 5%。
+                        """)
+
                     # ─── What-if 模擬器 ───
                     st.markdown("#### 🎮 What-if 模擬器（如果...會怎樣）")
                     st.caption("拖動下方 slider，模擬未來情境下這口合約值多少、賺賠多少。"
@@ -1503,8 +1545,8 @@ with _tab_opt:
 
                     # ─── 到期日損益圖（Plotly） ───
                     st.markdown("#### 📈 到期日損益曲線")
-                    st.caption("假設你今天進場，到了到期日，股價落在不同位置時的損益。"
-                               "**注意：到期前的損益會比這張圖溫和（時間價值還沒燒完）**。")
+                    st.caption("假設你今天進場，到了**到期那天**，股價落在不同位置時你能賺/賠多少。"
+                               "**注意：到期前的損益會比這張圖溫和**（因為時間價值還沒燒完）。")
                     try:
                         import plotly.graph_objects as go
                         prices, pnls = opt.expiration_pnl_curve(
@@ -1522,22 +1564,29 @@ with _tab_opt:
                         # P&L 曲線
                         fig.add_trace(go.Scatter(
                             x=prices, y=pnls, mode="lines",
-                            name="到期 P&L", line=dict(width=3),
+                            name="到期 P&L", line=dict(width=3, color="#1f9eff"),
                             fill="tozeroy",
                             fillcolor="rgba(0,200,0,0.08)" if _ot == "call" else "rgba(200,0,0,0.08)",
+                            hovertemplate="股價 $%{x:.2f}<br>損益 $%{y:+.0f}<extra></extra>",
                         ))
                         # 0 軸
                         fig.add_hline(y=0, line=dict(dash="dash", width=1, color="gray"))
-                        # 現價
+                        # 最大虧損水平線 + 右側標籤
+                        fig.add_hline(y=max_loss, line=dict(dash="dot", width=1, color="red"),
+                                      annotation_text=f"最大虧損 ${max_loss:.0f}",
+                                      annotation_position="bottom right",
+                                      annotation_font=dict(color="red", size=11))
+                        # 現價（橘色虛線）
                         fig.add_vline(x=spot, line=dict(dash="dot", color="orange"),
-                                      annotation_text=f"現價 ${spot:.2f}", annotation_position="top")
-                        # 盈虧平衡
+                                      annotation_text=f"🟠 現價 ${spot:.2f}", annotation_position="top")
+                        # 盈虧平衡（綠色虛線）
                         fig.add_vline(x=be_price, line=dict(dash="dash", color="green"),
-                                      annotation_text=f"BE ${be_price:.2f}", annotation_position="bottom")
-                        # 行權價
+                                      annotation_text=f"🟢 BE ${be_price:.2f}",
+                                      annotation_position="bottom")
+                        # 行權價（藍色虛線）
                         fig.add_vline(x=float(_picked_row["strike"]),
-                                      line=dict(dash="dot", color="blue"),
-                                      annotation_text=f"K ${_picked_row['strike']:.2f}",
+                                      line=dict(dash="dot", color="#3399ff"),
+                                      annotation_text=f"🔵 K ${_picked_row['strike']:.2f}",
                                       annotation_position="top")
                         fig.update_layout(
                             xaxis_title="到期日股價 ($)",
@@ -1545,23 +1594,55 @@ with _tab_opt:
                             height=380,
                             margin=dict(t=30, b=40, l=40, r=10),
                             showlegend=False,
-                            annotations=[dict(
-                                x=spot * 0.78, y=max_loss, xref="x", yref="y",
-                                text=f"最大虧損 ${max_loss:.0f}", showarrow=False,
-                                font=dict(color="red", size=11),
-                            )],
                         )
                         st.plotly_chart(fig, use_container_width=True)
                     except Exception as _e:
                         st.warning(f"⚠️ 損益圖渲染失敗：{_e}")
 
-                    # ─── 教學提示 ───
-                    with st.expander("💡 名詞解釋：Delta / Theta / IV / BE 是什麼？"):
-                        st.markdown("""
-- **Δ Delta**：股價 $1 變動 → 期權變多少。0.55 約等於「中獎機率 55%」。新手選 **0.45-0.65**。
-- **Θ Theta**：每過一天，期權跌多少（時間價值衰減）。**越接近 0 越好**。所以選 **DTE 21-45 天**，太短 Theta 吃光、太長資金占用。
-- **IV 隱含波動率**：市場對未來波動的預期。**IV 越高 → 期權越貴**。新手避開 IV > 50%。
-- **盈虧平衡點 (BE)**：到期股價要超過 BE 才賺錢。**Call BE = 行權價 + 權利金**；**Put BE = 行權價 - 權利金**。
-- **OI（Open Interest）未平倉量**：這口合約有多少張在市場上。**OI 大 = 流動性好、容易出場**。
-- **Bid/Ask 價差**：買賣價差。價差大代表你買進就賠掉滑價。買方要選價差 < 5%。
+                    # ─── 圖表解讀說明 ───
+                    with st.expander("📖 怎麼看這張圖？（第一次看請點開）", expanded=False):
+                        _ot_zh = "Call" if _ot == "call" else "Put"
+                        _strike = float(_picked_row["strike"])
+                        st.markdown(f"""
+#### 🧭 三條虛線分別代表什麼？
+
+| 顏色 | 線 | 意義 |
+|------|----|------|
+| 🟠 **橘色** | 現價 ${spot:.2f} | 標的股票**現在**的價格 |
+| 🔵 **藍色** | 行權價 K ${_strike:.2f} | 你選的這口 {_ot_zh} 的行使價 |
+| 🟢 **綠色** | 盈虧平衡點 BE ${be_price:.2f} | 到期股價要過這個你才賺錢 |
+| 🔴 **紅色橫線** | 最大虧損 ${max_loss:.0f} | 不管股價跌多少，你**最多**只賠這麼多（一口）|
+
+---
+
+#### 📊 怎麼讀曲線？
+
+**X 軸**：到期日當天的**股價**
+**Y 軸**：你的**損益**（正數賺、負數賠）
+
+藍色曲線在 BE 點之後**才上揚（=賺錢）**，BE 之前**是水平的**（=固定賠權利金）。
+
+**核心三段：**
+
+1. **股價低於行權價 ${_strike:.2f}**
+   → 你的 {_ot_zh} 一文不值 → **賠光權利金 ${max_loss:.0f}**
+
+2. **股價介於 ${_strike:.2f} ~ ${be_price:.2f}**
+   → 已有內含價值但還抵不過權利金 → **小賠**
+
+3. **股價超過 BE ${be_price:.2f}**
+   → 開始**淨賺** → 股票漲越多賺越多（理論上無上限）
+
+---
+
+#### 💡 三個常見問題
+
+**Q1：為什麼圖左半段是平的？**
+A: 因為 {_ot_zh} 買方**最多就是賠光權利金**，不會再多賠了（這也是「買方有限風險」的好處）。
+
+**Q2：為什麼右半段是斜的直線？**
+A: 股價每漲 $1，到期 {_ot_zh} 內含價值就多 $1（× 100 股 = $100）。所以你在 BE 之後是**槓桿放大**獲利。
+
+**Q3：那為什麼我現在持有時看到的損益不是這條線？**
+A: **這是「到期日」的損益**。到期前還有「時間價值」+「IV」加持，所以實際損益曲線會比這條溫和（虧損沒這麼慘、盈利也沒這麼大）。想看到期前的情境，回上面的 **🎮 What-if 模擬器** 拖 slider 看。
                         """)
