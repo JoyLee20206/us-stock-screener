@@ -1093,10 +1093,22 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
 
         run_options = ocol3.button("🔍 查詢", type="primary", use_container_width=True, key="opt_run")
 
+        # 用 session_state 保存查詢結果，避免互動 slider 時整段消失
+        _cache_key = (opt_ticker, opt_expiration)
         if run_options and opt_ticker and opt_expiration:
             with st.spinner(f"抓取 {opt_ticker} {opt_expiration} 期權鏈..."):
-                view = opt.build_buyer_view(opt_ticker, opt_expiration)
+                _view = opt.build_buyer_view(opt_ticker, opt_expiration)
+            st.session_state["opt_view"] = _view
+            st.session_state["opt_view_key"] = _cache_key
 
+        # 從 session_state 讀回（按過查詢、且 ticker/expiration 未變）
+        view = st.session_state.get("opt_view")
+        view_key = st.session_state.get("opt_view_key")
+        # 若代號/到期變了則清空（要求重新查詢）
+        if view is not None and view_key != _cache_key:
+            view = None
+
+        if view is not None:
             if "error" in view:
                 st.error(f"⚠️ {view['error']}")
             else:
