@@ -799,8 +799,20 @@ with st.expander("📌 我的持倉（股票 + 期權）", expanded=False):
                     missing_sids.append(pos['sid'])
 
             if missing_sids:
-                st.warning(f"⚠️ 以下持倉的代號在快取中找不到："
-                           f"{', '.join(missing_sids)}（可能拼寫錯誤或已從指數移除）")
+                _all_cached = set(df_daily["stock_id"].unique())
+                _cache_size = len(_all_cached)
+                # 對找不到的代號，建議鄰近字母的相似代號（fuzzy）
+                hints = []
+                for ms in missing_sids:
+                    similar = sorted([t for t in _all_cached
+                                       if t.startswith(ms[:2]) or t == ms.upper()])[:5]
+                    hints.append(f"**{ms}**" + (f"（快取中相似：{', '.join(similar)}）" if similar else ""))
+                st.warning(f"⚠️ 以下持倉的代號在快取中找不到：{', '.join(hints)}")
+                st.caption(f"💡 目前快取共 **{_cache_size} 檔**。若你確定代號正確（例如 ETF），"
+                           f"可能是 GitHub Actions 還沒抓到 → 觸發 workflow → Streamlit Cloud Reboot。"
+                           f"範例已有的 ETF：" + ", ".join(sorted([t for t in _all_cached
+                                                                       if t in {"SPY","QQQ","XLK","VEA","VTI",
+                                                                                "ARKK","TLT","GLD","IWM"}])))
 
             if rows:
                 df_pos = pd.DataFrame(rows)
