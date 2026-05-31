@@ -88,6 +88,8 @@
 ├── us_screener_ui.py            # 主程式（Streamlit UI，雲端部署入口）
 ├── us_screener.py               # 舊版精簡版（已被 us_screener_ui.py 取代，保留參考）
 ├── fetch_cache_us.py            # 美股每日資料抓取（GitHub Actions 每天自動執行）
+├── options_data.py              # 期權鏈抓取 + Black-Scholes Greeks + 智能標籤
+├── 期權新手指南.md              # 給沒接觸過期權的人看的入門教學（App 內可讀取）
 ├── requirements.txt             # Python 套件清單
 ├── README.md                    # 本檔案
 ├── .gitignore                   # Git 排除清單
@@ -120,8 +122,10 @@
 
 | 檔案 | 行數 | 職責 |
 |------|------|------|
-| `us_screener_ui.py` | ~750 | Streamlit 主程式：UI、選股邏輯、持倉管理、回測 |
+| `us_screener_ui.py` | ~1000 | Streamlit 主程式：UI、選股、持倉、回測、期權教學/瀏覽 |
 | `fetch_cache_us.py` | ~210 | 抓取成分股清單 + yfinance 增量下載 + 寫入 parquet |
+| `options_data.py` | ~250 | 期權鏈抓取 + Black-Scholes Greeks + 智能標籤邏輯 |
+| `期權新手指南.md` | ~250 | 給新手讀的期權入門文件，App 內透過 markdown 渲染顯示 |
 | `.github/workflows/fetch.yml` | ~40 | 每日排程：跑 fetch_cache_us.py + 上傳 Releases |
 
 ---

@@ -12,6 +12,15 @@ import requests
 
 POSITIONS_FILE = Path("positions") / "positions.json"
 SCANS_DIR = Path("scans")
+OPTIONS_GUIDE = Path("期權新手指南.md")
+
+# 期權工具模組（軟相依：缺檔時不影響主程式）
+try:
+    import options_data as opt
+    OPTIONS_AVAILABLE = True
+except Exception as _e:
+    OPTIONS_AVAILABLE = False
+    _OPT_IMPORT_ERROR = str(_e)
 TPE_TZ = timezone(timedelta(hours=8))   # 台北時間（UTC+8），Streamlit Cloud 跑在 UTC
 
 def now_tpe():
@@ -855,3 +864,161 @@ with st.expander("📈 績效回測", expanded=False):
                 st.caption("**分數分組表現**")
                 st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
             st.markdown("---")
+
+# ============================================================
+# 📚 G. 期權新手教學
+# ============================================================
+st.divider()
+with st.expander("📚 期權新手教學（沒接觸過期權？從這裡開始）", expanded=False):
+    if OPTIONS_GUIDE.exists():
+        try:
+            guide_md = OPTIONS_GUIDE.read_text(encoding="utf-8")
+            st.markdown(guide_md, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"⚠️ 期權新手指南讀取失敗：{e}")
+    else:
+        st.warning("⚠️ 找不到 `期權新手指南.md`，請確認檔案已隨專案部署。")
+
+# ============================================================
+# 🎯 H. 期權瀏覽（純買方視角）
+# ============================================================
+st.divider()
+with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
+    if not OPTIONS_AVAILABLE:
+        st.error(f"⚠️ 期權模組載入失敗：{_OPT_IMPORT_ERROR}。請確認 options_data.py 已隨專案部署。")
+    else:
+        st.caption("從選股結果挑一檔輸入，查看可用合約 + 智能標籤 + Greeks。新手請優先看 ⭐ 推薦標籤。")
+
+        # 預設代號：用剛掃描結果的第一檔，否則 SPY
+        default_sym = "SPY"
+        if isinstance(st.session_state.get("df_res"), pd.DataFrame) and not st.session_state.df_res.empty:
+            default_sym = str(st.session_state.df_res["代號"].iloc[0])
+
+        ocol1, ocol2, ocol3 = st.columns([2, 2, 1])
+        opt_ticker = ocol1.text_input("標的代號", value=default_sym, key="opt_ticker").strip().upper()
+
+        # 抓到期日清單
+        expirations = []
+        if opt_ticker:
+            with st.spinner(f"載入 {opt_ticker} 可選到期日..."):
+                expirations = opt.list_expirations(opt_ticker)
+
+        if not expirations:
+            ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
+            opt_expiration = None
+        else:
+            # 預設選第 2 個（避開週選常見的高 Theta 風險）
+            default_idx = min(1, len(expirations) - 1)
+            # 找出最接近 30 天的到期作為預設更聰明
+            try:
+                today = now_tpe().date()
+                target = today + timedelta(days=30)
+                deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days) for e in expirations]
+                default_idx = deltas.index(min(deltas))
+            except Exception:
+                pass
+            opt_expiration = ocol2.selectbox(
+                "到期日（預設選最接近 30 天）",
+                options=expirations,
+                index=default_idx,
+                key="opt_expiration",
+            )
+
+        run_options = ocol3.button("🔍 查詢", type="primary", use_container_width=True, key="opt_run")
+
+        if run_options and opt_ticker and opt_expiration:
+            with st.spinner(f"抓取 {opt_ticker} {opt_expiration} 期權鏈..."):
+                view = opt.build_buyer_view(opt_ticker, opt_expiration)
+
+            if "error" in view:
+                st.error(f"⚠️ {view['error']}")
+            else:
+                # 摘要列
+                mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                mcol1.metric("標的現價", f"${view['spot']}")
+                mcol2.metric("到期日", view["expiration"])
+                mcol3.metric("剩餘天數", f"{view['dte']} 天")
+                mcol4.metric("Call/Put 筆數", f"{len(view['calls'])} / {len(view['puts'])}")
+
+                # ⭐ 推薦合約
+                rec_c, rec_p = view.get("recommended_call"), view.get("recommended_put")
+                if rec_c or rec_p:
+                    st.markdown("### ⭐ 系統推薦合約（新手最適合的 Delta 0.45-0.65 + DTE 21-45）")
+                    rc1, rc2 = st.columns(2)
+                    if rec_c:
+                        with rc1:
+                            st.success(
+                                f"**📈 Long Call**：${rec_c['strike']:.2f}\n\n"
+                                f"權利金 ${rec_c['mid']:.2f} × 100 = **${rec_c['mid']*100:.0f}/口**\n\n"
+                                f"Δ={rec_c['delta']:.2f}  Θ={rec_c['theta_per_day']:.2f}/天  IV={rec_c['iv_pct']:.1f}%\n\n"
+                                f"盈虧平衡 ${rec_c['break_even']:.2f}（距現價 {rec_c['distance_pct']:+.2f}%）"
+                            )
+                    else:
+                        rc1.info("📈 Call 端目前無符合條件的 ⭐ 推薦合約")
+                    if rec_p:
+                        with rc2:
+                            st.success(
+                                f"**📉 Long Put**：${rec_p['strike']:.2f}\n\n"
+                                f"權利金 ${rec_p['mid']:.2f} × 100 = **${rec_p['mid']*100:.0f}/口**\n\n"
+                                f"Δ={rec_p['delta']:.2f}  Θ={rec_p['theta_per_day']:.2f}/天  IV={rec_p['iv_pct']:.1f}%\n\n"
+                                f"盈虧平衡 ${rec_p['break_even']:.2f}（距現價 {rec_p['distance_pct']:+.2f}%）"
+                            )
+                    else:
+                        rc2.info("📉 Put 端目前無符合條件的 ⭐ 推薦合約")
+
+                st.caption("📖 標籤說明：⭐推薦 / 💎ITM穩 / ⚠️太OTM / 🔥高IV / 💀Theta黑洞 / ❓流動性差")
+
+                # 完整鏈
+                tab_call, tab_put = st.tabs(["📈 Call 鏈", "📉 Put 鏈"])
+                with tab_call:
+                    df_call_show = opt.to_display_df(view["calls"])
+                    if df_call_show.empty:
+                        st.info("無 Call 資料")
+                    else:
+                        # 預設只顯示現價 ±20% 範圍內 + 有標籤的
+                        spot = view["spot"]
+                        df_call_show = df_call_show[
+                            (df_call_show["行權價"] >= spot * 0.80) &
+                            (df_call_show["行權價"] <= spot * 1.20)
+                        ]
+                        st.dataframe(
+                            df_call_show.sort_values("行權價"),
+                            use_container_width=True, hide_index=True,
+                            column_config={
+                                "中價": st.column_config.NumberColumn(format="$%.2f"),
+                                "Bid": st.column_config.NumberColumn(format="$%.2f"),
+                                "Ask": st.column_config.NumberColumn(format="$%.2f"),
+                                "行權價": st.column_config.NumberColumn(format="$%.2f"),
+                                "盈虧平衡": st.column_config.NumberColumn(format="$%.2f"),
+                                "距現價%": st.column_config.NumberColumn(format="%+.2f%%"),
+                                "Δ": st.column_config.NumberColumn(format="%.2f"),
+                                "Θ/天": st.column_config.NumberColumn(format="%.3f"),
+                            },
+                        )
+                with tab_put:
+                    df_put_show = opt.to_display_df(view["puts"])
+                    if df_put_show.empty:
+                        st.info("無 Put 資料")
+                    else:
+                        spot = view["spot"]
+                        df_put_show = df_put_show[
+                            (df_put_show["行權價"] >= spot * 0.80) &
+                            (df_put_show["行權價"] <= spot * 1.20)
+                        ]
+                        st.dataframe(
+                            df_put_show.sort_values("行權價"),
+                            use_container_width=True, hide_index=True,
+                            column_config={
+                                "中價": st.column_config.NumberColumn(format="$%.2f"),
+                                "Bid": st.column_config.NumberColumn(format="$%.2f"),
+                                "Ask": st.column_config.NumberColumn(format="$%.2f"),
+                                "行權價": st.column_config.NumberColumn(format="$%.2f"),
+                                "盈虧平衡": st.column_config.NumberColumn(format="$%.2f"),
+                                "距現價%": st.column_config.NumberColumn(format="%+.2f%%"),
+                                "Δ": st.column_config.NumberColumn(format="%.2f"),
+                                "Θ/天": st.column_config.NumberColumn(format="%.3f"),
+                            },
+                        )
+
+                st.caption("💡 表格只顯示行權價在現價 ±20% 範圍內的合約。Greeks 由 Black-Scholes 計算，"
+                           "假設無風險利率 4.5%、股息 0%。實際下單請以券商報價為準。")
