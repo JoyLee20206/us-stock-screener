@@ -91,6 +91,27 @@ def _download_parquet_from_url(url: str):
     return df, mtime
 
 def load_stock_data():
+    """
+    優先序：
+      1. 若有設定 PARQUET_URL secret → 一律從 GitHub Releases 下載（雲端部署用）
+         避免 repo 內舊的 cache/us_daily.parquet 蓋掉新版資料
+      2. 否則嘗試本地檔案（本機開發用）
+      3. 都沒有則報錯
+    """
+    try:
+        parquet_url = st.secrets.get("PARQUET_URL", "")
+    except Exception:
+        parquet_url = ""
+
+    # 雲端模式優先：有設 URL 就用 URL（永遠抓最新）
+    if parquet_url:
+        try:
+            df, mtime_tpe = _download_parquet_from_url(parquet_url)
+            return df, mtime_tpe
+        except Exception as e:
+            st.warning(f"⚠️ 雲端資料下載失敗：{e}，嘗試本地快取...")
+
+    # 本地模式 fallback
     local_file = CACHE_DIR / "us_daily.parquet"
     if local_file.exists():
         try:
@@ -101,21 +122,10 @@ def load_stock_data():
         except Exception as e:
             st.error(f"⚠️ 快取檔損毀：{e}")
             return None, None
-    # 雲端模式：從 GitHub Releases 下載
-    try:
-        parquet_url = st.secrets.get("PARQUET_URL", "")
-    except Exception:
-        parquet_url = ""
-    if not parquet_url:
-        st.error("⚠️ 找不到本機快取，也未設定 PARQUET_URL。"
-                 "請執行 fetch_cache_us.py，或在 Streamlit Cloud Secrets 設定 PARQUET_URL。")
-        return None, None
-    try:
-        df, mtime_tpe = _download_parquet_from_url(parquet_url)
-        return df, mtime_tpe
-    except Exception as e:
-        st.error(f"⚠️ 雲端資料下載失敗：{e}")
-        return None, None
+
+    st.error("⚠️ 找不到本機快取，也未設定 PARQUET_URL。"
+             "請執行 fetch_cache_us.py，或在 Streamlit Cloud Secrets 設定 PARQUET_URL。")
+    return None, None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def compute_rs_ratings(_df_daily: pd.DataFrame, mtime_key: float) -> dict:
