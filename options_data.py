@@ -137,9 +137,11 @@ def expiration_pnl_curve(option_type: str, strike: float, entry_premium: float,
 def risk_checklist(option_type: str, strike: float, mid: float,
                    delta: float, dte: int, iv: float,
                    open_interest: int, volume: int,
-                   bid: float, ask: float) -> list[dict]:
+                   bid: float, ask: float,
+                   next_earnings: str | None = None,
+                   expiration: str | None = None) -> list[dict]:
     """
-    買方進場前 6 項風險檢查。回傳清單，每項：
+    買方進場前 7 項風險檢查。回傳清單，每項：
         {key, label, status: '✅'|'⚠️'|'❌', detail}
     最後可額外用 verdict() 整合成 GO/CAUTION/STOP。
     """
@@ -219,6 +221,31 @@ def risk_checklist(option_type: str, strike: float, mid: float,
     else:
         items.append({"key": "spread", "label": "Bid/Ask 價差", "status": "❌",
                       "detail": "無有效 Bid/Ask"})
+
+    # 7. 跨財報日（IV crush 風險）
+    if next_earnings and expiration:
+        try:
+            today = date.today()
+            earn = datetime.strptime(next_earnings, "%Y-%m-%d").date()
+            exp = datetime.strptime(expiration, "%Y-%m-%d").date()
+            days_to_earn = (earn - today).days
+            if today <= earn <= exp:
+                # 確認跨財報 → 嚴重程度看距離財報多近
+                if days_to_earn <= 7:
+                    items.append({"key": "earnings", "label": "跨財報日", "status": "❌",
+                                  "detail": f"{next_earnings}（{days_to_earn} 天後）IV crush 風險極高"})
+                else:
+                    items.append({"key": "earnings", "label": "跨財報日", "status": "⚠️",
+                                  "detail": f"{next_earnings}（{days_to_earn} 天後）注意 IV crush"})
+            else:
+                items.append({"key": "earnings", "label": "跨財報日", "status": "✅",
+                              "detail": f"下次財報 {next_earnings}（在合約到期之後）"})
+        except Exception:
+            items.append({"key": "earnings", "label": "跨財報日", "status": "✅",
+                          "detail": "未檢出（資料解析失敗）"})
+    else:
+        items.append({"key": "earnings", "label": "跨財報日", "status": "✅",
+                      "detail": "未檢出財報日（可能無近期財報或資料不可得）"})
 
     return items
 
@@ -354,6 +381,19 @@ def evaluate_option_position(pos: dict, risk_free: float = 0.045) -> dict | None
             if tv_decay_per_day * 7 > time_value * 0.5 and dte < 21:
                 alerts.append("⚡ 時間價值將快速燒完")
 
+        # 跨財報警示（IV crush 風險）
+        try:
+            next_earn = get_next_earnings(sid)
+            if next_earn and crosses_earnings(expiration, next_earn):
+                earn_date = datetime.strptime(next_earn, "%Y-%m-%d").date()
+                days_to_earn = (earn_date - date.today()).days
+                if days_to_earn <= 3:
+                    alerts.append(f"🚨 財報倒數 {days_to_earn}d，建議平倉避 IV crush")
+                else:
+                    alerts.append(f"📅 跨財報 ({next_earn})")
+        except Exception:
+            pass
+
         return {
             "代號": sid,
             "類型": f"{opt_type.upper()} ${strike:.2f}",
@@ -487,6 +527,86 @@ def bs_greeks(option_type: str, S: float, K: float, T_days: float,
 # ============================================================
 # 期權鏈抓取
 # ============================================================
+# ============================================================
+# 財報日抓取（避免 IV Crush）
+# ============================================================
+_earnings_cache: dict[str, tuple[str, str | None]] = {}  # ticker → (抓取日, 下次財報日 ISO)
+
+
+def get_next_earnings(ticker: str, cache_hours: int = 6) -> str | None:
+    """
+    抓取下次財報日（ISO 字串 YYYY-MM-DD）。找不到回 None。
+    用 session 內字典快取避免重複呼叫 yfinance。
+
+    來源優先序：
+        1. ticker.calendar['Earnings Date']
+        2. ticker.earnings_dates（時序資料）
+    """
+    today_iso = date.today().isoformat()
+    # session cache hit
+    if ticker in _earnings_cache:
+        cached_day, cached_val = _earnings_cache[ticker]
+        if cached_day == today_iso:
+            return cached_val
+
+    next_earn = None
+    try:
+        tk = yf.Ticker(ticker)
+
+        # 嘗試 1：calendar dict
+        try:
+            cal = tk.calendar
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if isinstance(ed, list) and ed:
+                    ed = ed[0]
+                if hasattr(ed, "isoformat"):
+                    next_earn = ed.isoformat()[:10]
+                elif isinstance(ed, str) and len(ed) >= 10:
+                    next_earn = ed[:10]
+        except Exception:
+            pass
+
+        # 嘗試 2：earnings_dates DataFrame
+        if next_earn is None:
+            try:
+                df_ed = tk.earnings_dates
+                if df_ed is not None and not df_ed.empty:
+                    today = date.today()
+                    # 索引可能是 DatetimeIndex（含時區），轉成 date 比較
+                    dates_only = []
+                    for ts in df_ed.index:
+                        try:
+                            d = ts.date() if hasattr(ts, "date") else None
+                            if d:
+                                dates_only.append(d)
+                        except Exception:
+                            continue
+                    future = [d for d in dates_only if d >= today]
+                    if future:
+                        next_earn = min(future).isoformat()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    _earnings_cache[ticker] = (today_iso, next_earn)
+    return next_earn
+
+
+def crosses_earnings(expiration: str, next_earn_iso: str | None) -> bool:
+    """合約到期日是否跨越下次財報日（介於今天～到期 之間）"""
+    if not next_earn_iso:
+        return False
+    try:
+        today = date.today()
+        exp = datetime.strptime(expiration, "%Y-%m-%d").date()
+        earn = datetime.strptime(next_earn_iso, "%Y-%m-%d").date()
+        return today <= earn <= exp
+    except Exception:
+        return False
+
+
 def list_expirations(ticker: str) -> list[str]:
     """回傳該標的可選到期日清單（按時間排序）"""
     try:
@@ -528,7 +648,8 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
 # ============================================================
 def enrich_chain(df: pd.DataFrame, option_type: str, spot_price: float,
                  expiration: str, risk_free: float = 0.045,
-                 dividend_yield: float = 0.0) -> pd.DataFrame:
+                 dividend_yield: float = 0.0,
+                 next_earnings: str | None = None) -> pd.DataFrame:
     """
     給原始 option chain 加上：
       - dte（剩餘天數）
@@ -582,6 +703,11 @@ def enrich_chain(df: pd.DataFrame, option_type: str, spot_price: float,
 
     # IV 顯示成百分比
     df["iv_pct"] = (df["impliedVolatility"] * 100).round(1)
+
+    # 跨財報旗標
+    _cross = crosses_earnings(expiration, next_earnings)
+    df["crosses_earnings"] = _cross
+    df["earnings_flag"] = "🚨" if _cross else "—"
 
     return df
 
@@ -672,8 +798,11 @@ def build_buyer_view(ticker: str, expiration: str,
     except Exception as e:
         return {"error": f"期權鏈抓取失敗：{e}"}
 
-    df_call = enrich_chain(df_call, "call", spot_price, expiration, risk_free)
-    df_put = enrich_chain(df_put, "put", spot_price, expiration, risk_free)
+    next_earn = get_next_earnings(ticker)
+    df_call = enrich_chain(df_call, "call", spot_price, expiration, risk_free,
+                           next_earnings=next_earn)
+    df_put = enrich_chain(df_put, "put", spot_price, expiration, risk_free,
+                          next_earnings=next_earn)
     df_call = add_labels(df_call, "call")
     df_put = add_labels(df_put, "put")
 
@@ -699,6 +828,15 @@ def build_buyer_view(ticker: str, expiration: str,
         int(df_put["dte"].iloc[0]) if not df_put.empty else 0
     )
 
+    # 推算跨財報的「天數差」（給 UI 顯示警示嚴重程度）
+    days_to_earnings = None
+    if next_earn:
+        try:
+            earn_date = datetime.strptime(next_earn, "%Y-%m-%d").date()
+            days_to_earnings = (earn_date - date.today()).days
+        except Exception:
+            pass
+
     return {
         "spot": round(spot_price, 2),
         "expiration": expiration,
@@ -707,6 +845,9 @@ def build_buyer_view(ticker: str, expiration: str,
         "puts": df_put,
         "recommended_call": _pick_star(df_call, 0.55),
         "recommended_put": _pick_star(df_put, 0.55),
+        "next_earnings": next_earn,
+        "days_to_earnings": days_to_earnings,
+        "crosses_earnings": crosses_earnings(expiration, next_earn),
     }
 
 
@@ -815,13 +956,14 @@ def iv_history_status(history_path: str | Path = "cache/iv_history.parquet") -> 
         return {"exists": False, "days": 0, "tickers": 0, "first_date": None, "last_date": None}
 
 
-DISPLAY_COLS = ["label", "strike", "mid", "bid", "ask",
+DISPLAY_COLS = ["label", "earnings_flag", "strike", "mid", "bid", "ask",
                 "delta", "theta_per_day", "iv_pct",
                 "break_even", "distance_pct",
                 "openInterest", "volume", "dte"]
 
 DISPLAY_COL_NAMES = {
     "label": "標籤",
+    "earnings_flag": "📅",
     "strike": "行權價",
     "mid": "中價",
     "bid": "Bid",

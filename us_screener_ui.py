@@ -1068,12 +1068,39 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
             if "error" in view:
                 st.error(f"⚠️ {view['error']}")
             else:
-                # 摘要列（含 IV Rank）
-                mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
+                # ⚠️ 跨財報全域警示橫條
+                if view.get("crosses_earnings"):
+                    _dt_earn = view.get("days_to_earnings")
+                    _earn_date = view.get("next_earnings")
+                    if _dt_earn is not None and _dt_earn <= 7:
+                        st.error(f"🚨 跨財報警示：下次財報 **{_earn_date}**（{_dt_earn} 天後），"
+                                 f"買方建議避開或選財報後到期。IV crush 風險極高。")
+                    else:
+                        st.warning(f"📅 跨財報注意：合約到期前有財報 **{_earn_date}**"
+                                   f"（{_dt_earn} 天後）。財報後 IV 通常會崩塌，買方獲利機率下降。")
+
+                # 摘要列（含 IV Rank + 下次財報日）
+                mcol1, mcol2, mcol3, mcol4, mcol5, mcol6 = st.columns(6)
                 mcol1.metric("標的現價", f"${view['spot']}")
                 mcol2.metric("到期日", view["expiration"])
                 mcol3.metric("剩餘天數", f"{view['dte']} 天")
                 mcol4.metric("Call/Put 筆數", f"{len(view['calls'])} / {len(view['puts'])}")
+
+                # 下次財報日（第 6 欄）
+                if view.get("next_earnings"):
+                    _dt_earn = view.get("days_to_earnings")
+                    if view.get("crosses_earnings"):
+                        mcol6.metric("📅 下次財報", view["next_earnings"],
+                                     delta=f"🚨 {_dt_earn} 天後（跨合約）",
+                                     delta_color="inverse",
+                                     help="財報日在合約到期日之前，買方 IV crush 風險。")
+                    else:
+                        mcol6.metric("📅 下次財報", view["next_earnings"],
+                                     delta=f"{_dt_earn} 天後",
+                                     help="財報日在合約到期日之後，本次合約不受影響。")
+                else:
+                    mcol6.metric("📅 下次財報", "—", delta="無資料",
+                                 help="yfinance 找不到財報日。可能無近期財報或資料源無此標的。")
 
                 # 波動率指標雙軌：IV Rank（真實，需累積） + RV Rank（估算，立即可用）
                 _atm_iv = None
@@ -1271,6 +1298,8 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
                         volume=int(_picked_row.get("volume") or 0),
                         bid=float(_picked_row.get("bid") or 0),
                         ask=float(_picked_row.get("ask") or 0),
+                        next_earnings=view.get("next_earnings"),
+                        expiration=view.get("expiration"),
                     )
                     verd = opt.verdict(checklist)
                     if verd["light"] == "✅":
@@ -1280,9 +1309,10 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
                     else:
                         st.error(f"**{verd['light']} {verd['label']}** — {verd['msg']}")
 
-                    chk_cols = st.columns(3)
+                    # 7 項風險檢查改成 2 欄佈局（第 7 項為跨財報，內容較長）
+                    chk_cols = st.columns(2)
                     for ci, item in enumerate(checklist):
-                        chk_cols[ci % 3].markdown(f"**{item['status']} {item['label']}**: {item['detail']}")
+                        chk_cols[ci % 2].markdown(f"**{item['status']} {item['label']}**: {item['detail']}")
 
                     # ─── What-if 模擬器 ───
                     st.markdown("#### 🎮 What-if 模擬器（如果...會怎樣）")
