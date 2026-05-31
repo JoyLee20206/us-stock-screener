@@ -1,0 +1,45 @@
+name: Daily US Stock Cache Update
+
+on:
+  schedule:
+    # UTC 21:30 = 台灣時間次日 05:30（週一到週五，美股收盤後）
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch:   # 允許在 GitHub Actions 頁面手動觸發
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 允許建立/更新 Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fetch_cache_us.py
+        run: python fetch_cache_us.py
+
+      - name: Upload parquet to GitHub Releases (tag = data-cache)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 如果 data-cache Release 不存在則建立
+          gh release view data-cache 2>/dev/null || \
+            gh release create data-cache \
+              --title "Stock Data Cache" \
+              --notes "每日由 GitHub Actions 自動更新" \
+              --latest=false
+
+          # 上傳（--clobber 覆蓋既有同名檔案）
+          gh release upload data-cache cache/us_daily.parquet --clobber
+
+          echo "✅ 上傳完成：$(date -u '+%Y-%m-%d %H:%M UTC')"
