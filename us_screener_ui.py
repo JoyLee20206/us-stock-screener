@@ -750,7 +750,7 @@ if run_scan:
             if OPTIONS_AVAILABLE:
                 st.markdown("---")
                 st.markdown("### 📈 對掃描結果產生期權買方建議")
-                rcols = st.columns([1, 1, 1, 3])
+                rcols = st.columns([1, 1, 1, 1.2, 1.5])
                 top_n = rcols[0].number_input("Top N 名", min_value=1, max_value=20,
                                                value=min(5, len(df_res)), step=1,
                                                key="opt_topn")
@@ -760,20 +760,27 @@ if run_scan:
                 opt_direction = rcols[2].selectbox("方向", options=["call", "put"],
                                                     key="opt_direction",
                                                     help="看漲選 call，看跌選 put")
-                if rcols[3].button("🎯 批次查詢", type="primary", key="batch_opt_btn",
-                                    use_container_width=False):
+                avoid_earnings = rcols[3].toggle("📆 避開財報", value=False,
+                                                  key="opt_avoid_earn",
+                                                  help="開啟後會自動挑「財報後 ~14 天」的到期日，"
+                                                       "避免 IV crush。沒有財報的標的則用一般 30 天邏輯。")
+                if rcols[4].button("🎯 批次查詢", type="primary", key="batch_opt_btn",
+                                    use_container_width=True):
                     tickers = df_res["代號"].head(int(top_n)).tolist()
-                    with st.spinner(f"查詢 {len(tickers)} 檔的 ⭐ 推薦合約..."):
+                    with st.spinner(f"查詢 {len(tickers)} 檔的 ⭐ 推薦合約"
+                                    f"{'（已避開財報）' if avoid_earnings else ''}..."):
                         recs = opt.recommend_for_tickers(tickers, target_dte=int(target_dte),
-                                                          option_type=opt_direction)
+                                                          option_type=opt_direction,
+                                                          avoid_earnings=avoid_earnings)
                     st.session_state["batch_recs"] = pd.DataFrame(recs)
-                    st.session_state["batch_recs_key"] = (tuple(tickers), int(target_dte), opt_direction)
+                    st.session_state["batch_recs_key"] = (tuple(tickers), int(target_dte),
+                                                            opt_direction, avoid_earnings)
 
                 # 從 session_state 還原批次查詢結果（互動其他元件不會消失）
                 _batch_recs = st.session_state.get("batch_recs")
                 _batch_key = st.session_state.get("batch_recs_key")
                 _current_batch_key = (tuple(df_res["代號"].head(int(top_n)).tolist()),
-                                       int(target_dte), opt_direction)
+                                       int(target_dte), opt_direction, avoid_earnings)
                 if _batch_recs is not None and _batch_key == _current_batch_key:
                     st.dataframe(_batch_recs, use_container_width=True, hide_index=True)
                     st.caption("💡 想看完整鏈與風險分析，請切到「🎯 期權瀏覽」頁籤輸入代號查詢。")
@@ -1129,8 +1136,11 @@ with _tab_opt:
 
 **C. 想避開財報 IV crush**
 - 摘要列第 6 欄 **下次財報日**
-- 跨財報時頂端會出現紅色橫條
-- 改選到期日 **在財報之後**的合約
+- 跨財報時頂端會出現紅色橫條 + **「📆 改選 YYYY-MM-DD」一鍵切換到財報後到期**按鈕
+- 系統會額外顯示 **IV/RV 比例**（earnings drift 偵測）：
+  - ✓ 正常（< 1.2）→ 進場時機 OK
+  - 📈 偏高（1.2-1.4）→ 已有事件溢價
+  - 🔥 暴衝（> 1.4）→ 強烈不建議買方進場
 
 **D. 想比較兩個行權價**
 - 在「🔍 合約分析」下拉切換不同 strike
@@ -1231,7 +1241,7 @@ with _tab_opt:
         _cache_key = (opt_ticker, opt_expiration)
         if run_options and opt_ticker and opt_expiration:
             with st.spinner(f"抓取 {opt_ticker} {opt_expiration} 期權鏈..."):
-                _view = opt.build_buyer_view(opt_ticker, opt_expiration)
+                _view = opt.build_buyer_view(opt_ticker, opt_expiration, df_daily=df_daily)
             st.session_state["opt_view"] = _view
             st.session_state["opt_view_key"] = _cache_key
 
@@ -1246,16 +1256,42 @@ with _tab_opt:
             if "error" in view:
                 st.error(f"⚠️ {view['error']}")
             else:
-                # ⚠️ 跨財報全域警示橫條
+                # ⚠️ 跨財報全域警示橫條 + 「改選財報後到期」按鈕
                 if view.get("crosses_earnings"):
                     _dt_earn = view.get("days_to_earnings")
                     _earn_date = view.get("next_earnings")
-                    if _dt_earn is not None and _dt_earn <= 7:
-                        st.error(f"🚨 跨財報警示：下次財報 **{_earn_date}**（{_dt_earn} 天後），"
-                                 f"買方建議避開或選財報後到期。IV crush 風險極高。")
+                    _post_exp = view.get("post_earnings_expiration")
+                    _warn_cols = st.columns([4, 1])
+                    with _warn_cols[0]:
+                        if _dt_earn is not None and _dt_earn <= 7:
+                            st.error(f"🚨 跨財報警示：下次財報 **{_earn_date}**（{_dt_earn} 天後），"
+                                     f"買方建議避開或選財報後到期。IV crush 風險極高。")
+                        else:
+                            st.warning(f"📅 跨財報注意：合約到期前有財報 **{_earn_date}**"
+                                       f"（{_dt_earn} 天後）。財報後 IV 通常會崩塌，買方獲利機率下降。")
+                    with _warn_cols[1]:
+                        if _post_exp and _post_exp != view["expiration"]:
+                            if st.button(f"📆 改選 {_post_exp}", key="switch_post_earn",
+                                         use_container_width=True,
+                                         help=f"自動切換到財報後到期日 {_post_exp}（財報後 ~14 天）"):
+                                # 直接修改 expiration 選項並重新查詢
+                                st.session_state["opt_expiration"] = _post_exp
+                                with st.spinner("重新抓取財報後到期合約..."):
+                                    _new_view = opt.build_buyer_view(opt_ticker, _post_exp,
+                                                                       df_daily=df_daily)
+                                st.session_state["opt_view"] = _new_view
+                                st.session_state["opt_view_key"] = (opt_ticker, _post_exp)
+                                st.rerun()
+
+                # 📈 IV Drift（earnings drift）警示橫條
+                _drift = view.get("iv_drift")
+                if _drift and _drift.get("is_drift"):
+                    if _drift["drift_level"] == "strong":
+                        st.error(f"🔥 **IV 暴衝偵測**：{_drift['msg']}。"
+                                 f"買方此時進場將承受極大 IV crush 風險，建議**等財報後再進**或**改選財報後到期**。")
                     else:
-                        st.warning(f"📅 跨財報注意：合約到期前有財報 **{_earn_date}**"
-                                   f"（{_dt_earn} 天後）。財報後 IV 通常會崩塌，買方獲利機率下降。")
+                        st.warning(f"📈 **IV 突增偵測**：{_drift['msg']}。"
+                                   f"已有事件溢價，建議比較 IV/RV 後再決定。")
 
                 # 摘要列（含 IV Rank + 下次財報日）
                 mcol1, mcol2, mcol3, mcol4, mcol5, mcol6 = st.columns(6)
@@ -1279,6 +1315,27 @@ with _tab_opt:
                 else:
                     mcol6.metric("📅 下次財報", "—", delta="無資料",
                                  help="yfinance 找不到財報日。可能無近期財報或資料源無此標的。")
+
+                # IV/RV 比率（用於 earnings drift 偵測），單獨一列顯示
+                if _drift:
+                    _ratio = _drift["iv_rv_ratio"]
+                    _iv_pct = _drift["iv"] * 100
+                    _rv_pct = _drift["rv"] * 100
+                    _level = _drift["drift_level"]
+                    _tip = (f"IV (ATM)：{_iv_pct:.1f}%  ｜  RV (20日)：{_rv_pct:.1f}%\n"
+                            f"IV/RV = {_ratio}（{_level}）\n"
+                            f"財報前 1-3 週這個比例會從 ~1.0 飆到 1.3-1.6（earnings drift）。"
+                            f"買方在 ratio < 1.2 時進場最划算。")
+                    if _level == "strong":
+                        st.error(f"📊 **IV/RV 比例**：{_ratio}（🔥 暴衝） ｜ IV={_iv_pct:.1f}% RV={_rv_pct:.1f}%"
+                                 f"  ｜ 距財報 {_drift.get('days_to_earnings', '-')} 天",
+                                 icon="📈")
+                    elif _level == "elevated":
+                        st.warning(f"📊 **IV/RV 比例**：{_ratio}（📈 偏高） ｜ IV={_iv_pct:.1f}% RV={_rv_pct:.1f}%"
+                                   f"  ｜ 距財報 {_drift.get('days_to_earnings', '-')} 天",
+                                   icon="📈")
+                    else:
+                        st.caption(f"📊 IV/RV 比例：{_ratio}（✓ 正常） ｜ IV={_iv_pct:.1f}% RV={_rv_pct:.1f}%")
 
                 # 波動率指標雙軌：IV Rank（真實，需累積） + RV Rank（估算，立即可用）
                 _atm_iv = None

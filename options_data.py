@@ -425,9 +425,15 @@ def evaluate_option_position(pos: dict, risk_free: float = 0.045) -> dict | None
 # ============================================================
 def recommend_for_tickers(tickers: list[str], target_dte: int = 30,
                           option_type: str = "call",
-                          risk_free: float = 0.045) -> list[dict]:
+                          risk_free: float = 0.045,
+                          avoid_earnings: bool = False,
+                          post_earnings_dte: int = 14) -> list[dict]:
     """
     對一批 ticker，找出最接近 target_dte 的到期日，並回傳 ⭐ 推薦合約。
+
+    Args:
+        avoid_earnings: True 時，跳過跨財報的到期日，自動挑「財報後 N 天」最接近的
+        post_earnings_dte: avoid_earnings=True 時的目標 DTE（從財報日算起）
 
     Returns: 每檔一筆 dict，包含 sid + 推薦 Call/Put 摘要 + 標籤。
     找不到推薦時欄位留 None。
@@ -444,9 +450,19 @@ def recommend_for_tickers(tickers: list[str], target_dte: int = 30,
                 out["備註"] = "無期權"
                 results.append(out)
                 continue
-            target = today + timedelta(days=target_dte)
-            deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days) for e in exps]
-            chosen_exp = exps[deltas.index(min(deltas))]
+
+            # 決定到期日
+            if avoid_earnings:
+                chosen_exp = find_post_earnings_expiration(sid, post_earnings_dte)
+                if chosen_exp is None:
+                    out["備註"] = "❌ 找不到財報後到期"
+                    results.append(out)
+                    continue
+            else:
+                target = today + timedelta(days=target_dte)
+                deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days)
+                          for e in exps]
+                chosen_exp = exps[deltas.index(min(deltas))]
 
             spot = get_spot_price(sid)
             if spot is None:
@@ -470,7 +486,7 @@ def recommend_for_tickers(tickers: list[str], target_dte: int = 30,
                 out["權利金"] = round(rec["mid"], 2)
                 out["盈虧平衡"] = round(rec["break_even"], 2)
                 out["距現價%"] = round(rec["distance_pct"], 2)
-                out["備註"] = "⭐ 推薦"
+                out["備註"] = "⭐ 推薦（已避開財報）" if avoid_earnings else "⭐ 推薦"
             else:
                 out["備註"] = "無 ⭐ 推薦（可手動到期權瀏覽查看其他標籤）"
         except Exception as e:
@@ -592,6 +608,63 @@ def get_next_earnings(ticker: str, cache_hours: int = 6) -> str | None:
 
     _earnings_cache[ticker] = (today_iso, next_earn)
     return next_earn
+
+
+def list_expirations_after_earnings(ticker: str, next_earnings: str | None
+                                    ) -> tuple[list[str], list[str]]:
+    """
+    將標的的可選到期日分成兩組：(財報前, 財報後)。
+
+    若無財報資訊，全部歸為「財報前」（不影響原本選擇邏輯）。
+    """
+    exps = list_expirations(ticker)
+    if not exps:
+        return [], []
+    if not next_earnings:
+        return exps, []
+    try:
+        earn_date = datetime.strptime(next_earnings, "%Y-%m-%d").date()
+        pre, post = [], []
+        for e in exps:
+            try:
+                d = datetime.strptime(e, "%Y-%m-%d").date()
+                (pre if d <= earn_date else post).append(e)
+            except Exception:
+                continue
+        return pre, post
+    except Exception:
+        return exps, []
+
+
+def find_post_earnings_expiration(ticker: str, target_dte_after: int = 14) -> str | None:
+    """
+    找「財報後 target_dte_after 天」最接近的到期日。
+
+    用途：批次推薦時，自動避開 IV crush，挑選財報之後的合約。
+    若該標的無財報資料，退回一般 30 天邏輯。
+    """
+    next_earn = get_next_earnings(ticker)
+    exps = list_expirations(ticker)
+    if not exps:
+        return None
+
+    if not next_earn:
+        # 無財報 → 用一般 30 天目標
+        target = date.today() + timedelta(days=30)
+        deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days) for e in exps]
+        return exps[deltas.index(min(deltas))]
+
+    try:
+        earn_date = datetime.strptime(next_earn, "%Y-%m-%d").date()
+        target = earn_date + timedelta(days=target_dte_after)
+        _, post_exps = list_expirations_after_earnings(ticker, next_earn)
+        if not post_exps:
+            return None
+        deltas = [abs((datetime.strptime(e, "%Y-%m-%d").date() - target).days)
+                  for e in post_exps]
+        return post_exps[deltas.index(min(deltas))]
+    except Exception:
+        return None
 
 
 def crosses_earnings(expiration: str, next_earn_iso: str | None) -> bool:
@@ -772,7 +845,8 @@ def add_labels(df: pd.DataFrame, option_type: str = "call") -> pd.DataFrame:
 # ============================================================
 def build_buyer_view(ticker: str, expiration: str,
                      spot_price: float | None = None,
-                     risk_free: float = 0.045) -> dict:
+                     risk_free: float = 0.045,
+                     df_daily: "pd.DataFrame | None" = None) -> dict:
     """
     新手買方專屬：抓鏈 + Greeks + 標籤一條龍。
 
@@ -837,6 +911,23 @@ def build_buyer_view(ticker: str, expiration: str,
         except Exception:
             pass
 
+    # IV drift（earnings drift）偵測：取 ATM Call IV 跟 RV 比
+    iv_drift = None
+    if df_daily is not None and not df_call.empty:
+        try:
+            _atm_row = df_call.copy()
+            _atm_row["_d"] = (_atm_row["strike"] - spot_price).abs()
+            _atm_iv = float(_atm_row.sort_values("_d").iloc[0].get("impliedVolatility", 0) or 0)
+            if _atm_iv > 0:
+                iv_drift = detect_iv_drift(_atm_iv, ticker, df_daily, next_earn)
+        except Exception:
+            pass
+
+    # 財報後到期建議（給 UI「改選財報後到期」按鈕用）
+    post_earnings_exp = None
+    if next_earn:
+        post_earnings_exp = find_post_earnings_expiration(ticker, target_dte_after=14)
+
     return {
         "spot": round(spot_price, 2),
         "expiration": expiration,
@@ -848,6 +939,8 @@ def build_buyer_view(ticker: str, expiration: str,
         "next_earnings": next_earn,
         "days_to_earnings": days_to_earnings,
         "crosses_earnings": crosses_earnings(expiration, next_earn),
+        "iv_drift": iv_drift,
+        "post_earnings_expiration": post_earnings_exp,
     }
 
 
@@ -934,6 +1027,89 @@ def compute_rv_rank(ticker: str, df_daily: "pd.DataFrame | None" = None,
                 "samples": len(sub)}
     except Exception:
         return None
+
+
+def detect_iv_drift(current_iv: float, ticker: str,
+                    df_daily: "pd.DataFrame | None" = None,
+                    next_earnings: str | None = None,
+                    window: int = 20) -> dict | None:
+    """
+    偵測「財報前 IV 突增（earnings drift）」現象。
+
+    原理：
+        財報前 1-3 週，市場參與者買期權對沖/投機，推升 IV 遠高於實現波動率 (RV)。
+        透過 IV/RV 比例可以量化這個「事件溢價」。
+
+    判定條件（雙重）：
+        1. IV/RV > 1.30（IV 比 RV 高出至少 30%）
+        2. 下次財報日在 30 天內
+
+    Returns:
+        {
+            'iv': 當前 IV (小數),
+            'rv': 過去 20 日實現波動率 (小數),
+            'iv_rv_ratio': IV/RV 比 (例如 1.45),
+            'days_to_earnings': N 天 or None,
+            'drift_level': 'normal' | 'elevated' | 'strong',
+            'is_drift': bool,
+            'msg': 描述字串,
+        }
+        或 None（無法計算）
+    """
+    rv_info = compute_rv_rank(ticker, df_daily, window=window)
+    if not rv_info or "rv_now" not in rv_info or current_iv <= 0:
+        return None
+
+    rv = rv_info["rv_now"]
+    if rv <= 0:
+        return None
+
+    ratio = current_iv / rv
+
+    # 距財報天數
+    days_to_earn = None
+    if next_earnings:
+        try:
+            earn = datetime.strptime(next_earnings, "%Y-%m-%d").date()
+            days_to_earn = (earn - date.today()).days
+        except Exception:
+            pass
+
+    # IV/RV 分級
+    if ratio < 1.20:
+        level = "normal"
+    elif ratio < 1.40:
+        level = "elevated"
+    else:
+        level = "strong"
+
+    # 是否確認 earnings drift：IV/RV 偏高 + 財報在 30 天內
+    is_drift = (level in ("elevated", "strong")
+                and days_to_earn is not None
+                and 0 <= days_to_earn <= 30)
+
+    # 描述
+    if is_drift:
+        if level == "strong":
+            msg = (f"🔥 IV 暴衝（IV/RV={ratio:.2f}）— 財報 {days_to_earn} 天後，"
+                   f"市場已大幅 pricing in，買方需謹慎")
+        else:
+            msg = (f"📈 IV 偏高（IV/RV={ratio:.2f}）— 財報 {days_to_earn} 天後，"
+                   f"已有事件溢價")
+    elif level != "normal":
+        msg = f"⚠️ IV/RV={ratio:.2f}（偏高但無近期財報）"
+    else:
+        msg = f"✓ IV/RV={ratio:.2f}（正常）"
+
+    return {
+        "iv": round(current_iv, 4),
+        "rv": round(rv, 4),
+        "iv_rv_ratio": round(ratio, 2),
+        "days_to_earnings": days_to_earn,
+        "drift_level": level,
+        "is_drift": is_drift,
+        "msg": msg,
+    }
 
 
 def iv_history_status(history_path: str | Path = "cache/iv_history.parquet") -> dict:
