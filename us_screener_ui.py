@@ -24,7 +24,7 @@ CACHE_DIR = Path("cache")
 # 自定義美化 CSS
 st.markdown("""<style>
     /* 縮減主畫面頂部留白（保留 2.5rem 避免被 Streamlit toolbar 蓋住）*/
-    .block-container { padding-top: 2.5rem !important; padding-bottom: 1rem !important; }
+    .block-container { padding-top: 4rem !important; padding-bottom: 1rem !important; }
     /* 自訂緊湊型標題 — color: inherit 確保深淺色主題都顯示 */
     .app-title {
         font-size: 1.6rem;
