@@ -96,7 +96,7 @@ def _flatten(data, tickers_list):
 
 def main():
     print("=" * 60)
-    print("🌟 美股黃金選股池增量快取更新 (S&P 500 + NDX + SOX)")
+    print("🌟 美股黃金選股池增量快取更新 (S&P 500 + NDX + SP400 + SOX)")
     print("=" * 60)
 
     output_file = CACHE_DIR / "us_daily.parquet"
