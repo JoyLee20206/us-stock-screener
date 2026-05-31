@@ -1,0 +1,52 @@
+name: Daily IV History Snapshot
+
+on:
+  schedule:
+    # UTC 21:45 = 台灣時間次日 05:45（在主資料抓取後 15 分鐘執行）
+    - cron: '45 21 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  fetch_iv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download existing iv_history from Releases (if exists)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        run: |
+          mkdir -p cache
+          gh release download data-cache --pattern "iv_history.parquet" --dir cache/ 2>/dev/null || \
+            echo "尚無 iv_history.parquet，首次執行將自動建立"
+
+      - name: Run fetch_iv_history.py
+        run: python fetch_iv_history.py
+
+      - name: Upload iv_history.parquet to Releases (tag = data-cache)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view data-cache 2>/dev/null || \
+            gh release create data-cache \
+              --title "Stock Data Cache" \
+              --notes "每日由 GitHub Actions 自動更新" \
+              --latest=false
+
+          gh release upload data-cache cache/iv_history.parquet --clobber
+
+          echo "✅ IV 歷史上傳完成：$(date -u '+%Y-%m-%d %H:%M UTC')"
