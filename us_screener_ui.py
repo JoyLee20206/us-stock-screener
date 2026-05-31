@@ -906,7 +906,10 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
             default_sym = str(st.session_state.df_res["代號"].iloc[0])
 
         ocol1, ocol2, ocol3 = st.columns([2, 2, 1])
-        opt_ticker = ocol1.text_input("標的代號", value=default_sym, key="opt_ticker").strip().upper()
+        opt_ticker = ocol1.text_input(
+            "標的代號", value=default_sym, key="opt_ticker",
+            help="輸入美股代號（例如 NVDA、SPY、AAPL）。新手建議從 SPY、QQQ 等 ETF 開始。",
+        ).strip().upper()
 
         # 抓到期日清單
         expirations = []
@@ -933,6 +936,7 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
                 options=expirations,
                 index=default_idx,
                 key="opt_expiration",
+                help="期權買方甜蜜點是 21-45 天。太短 Theta 損耗快、太長資金占用久。",
             )
 
         run_options = ocol3.button("🔍 查詢", type="primary", use_container_width=True, key="opt_run")
@@ -1036,3 +1040,183 @@ with st.expander("🎯 期權瀏覽（純買方視角）", expanded=False):
 
                 st.caption("💡 表格只顯示行權價在現價 ±20% 範圍內的合約。Greeks 由 Black-Scholes 計算，"
                            "假設無風險利率 4.5%、股息 0%。實際下單請以券商報價為準。")
+
+                # ─────────────────────────────────────────────
+                # 🔍 合約分析：風險清單 + What-if 模擬器 + 損益圖
+                # ─────────────────────────────────────────────
+                st.markdown("---")
+                st.markdown("### 🔍 合約分析（風險清單 + 模擬器 + 損益圖）")
+                st.caption("挑一口你想下的合約，系統幫你做進場前 6 項風險檢查、模擬未來情境、畫到期損益曲線。")
+
+                acol1, acol2, acol3 = st.columns([1, 2, 1])
+                analysis_type = acol1.radio(
+                    "合約類型",
+                    options=["Call", "Put"],
+                    horizontal=True,
+                    key="opt_analysis_type",
+                    help="Call 適合看漲；Put 適合看跌。新手建議先從 Call 開始。",
+                )
+                _ot = "call" if analysis_type == "Call" else "put"
+                _src_df = view["calls"] if _ot == "call" else view["puts"]
+
+                # 篩出可選的行權價（±25% 範圍）
+                spot = view["spot"]
+                _src_df = _src_df[
+                    (_src_df["strike"] >= spot * 0.75) &
+                    (_src_df["strike"] <= spot * 1.25)
+                ].sort_values("strike")
+
+                if _src_df.empty:
+                    st.warning("⚠️ 沒有可分析的合約")
+                else:
+                    # 用 label + strike 製作下拉選項，預設選 ⭐ 推薦的
+                    _options = []
+                    _default_idx = 0
+                    _star_idx = None
+                    for i, (_, r) in enumerate(_src_df.iterrows()):
+                        _opt_label = f"${r['strike']:.2f}  [{r['label']}]  Δ={r['delta']:.2f}  Θ={r['theta_per_day']:.3f}  Bid/Ask ${r['bid']:.2f}/${r['ask']:.2f}"
+                        _options.append(_opt_label)
+                        if r["label"] == "⭐ 推薦" and _star_idx is None:
+                            _star_idx = i
+                    if _star_idx is not None:
+                        _default_idx = _star_idx
+
+                    _picked = acol2.selectbox(
+                        "選擇合約",
+                        options=_options,
+                        index=_default_idx,
+                        key="opt_picked",
+                        help="預設選 ⭐ 推薦合約。可下拉換不同行權價比較。",
+                    )
+                    _picked_row = _src_df.iloc[_options.index(_picked)]
+
+                    # ─── 風險清單 ───
+                    st.markdown("#### ✅ 進場前 6 項風險檢查")
+                    checklist = opt.risk_checklist(
+                        option_type=_ot,
+                        strike=float(_picked_row["strike"]),
+                        mid=float(_picked_row["mid"]),
+                        delta=float(_picked_row["delta"]) if pd.notna(_picked_row["delta"]) else 0.0,
+                        dte=int(_picked_row["dte"]),
+                        iv=float(_picked_row["impliedVolatility"]) if pd.notna(_picked_row["impliedVolatility"]) else 0.0,
+                        open_interest=int(_picked_row.get("openInterest") or 0),
+                        volume=int(_picked_row.get("volume") or 0),
+                        bid=float(_picked_row.get("bid") or 0),
+                        ask=float(_picked_row.get("ask") or 0),
+                    )
+                    verd = opt.verdict(checklist)
+                    if verd["light"] == "✅":
+                        st.success(f"**{verd['light']} {verd['label']}** — {verd['msg']}")
+                    elif verd["light"] == "⚠️":
+                        st.warning(f"**{verd['light']} {verd['label']}** — {verd['msg']}")
+                    else:
+                        st.error(f"**{verd['light']} {verd['label']}** — {verd['msg']}")
+
+                    chk_cols = st.columns(3)
+                    for ci, item in enumerate(checklist):
+                        chk_cols[ci % 3].markdown(f"**{item['status']} {item['label']}**: {item['detail']}")
+
+                    # ─── What-if 模擬器 ───
+                    st.markdown("#### 🎮 What-if 模擬器（如果...會怎樣）")
+                    st.caption("拖動下方 slider，模擬未來情境下這口合約值多少、賺賠多少。"
+                               "💡 試試把「股價變動」設 +5%，「天數經過」設 14 天 — 看 Theta 怎麼吃掉你的獲利。")
+                    sim_c1, sim_c2, sim_c3 = st.columns(3)
+                    sim_spot = sim_c1.slider("股價變動 %", -15.0, 15.0, 0.0, 0.5,
+                                              key="sim_spot",
+                                              help="假設股價漲跌多少。+5 = 漲 5%、-5 = 跌 5%")
+                    _max_days = int(_picked_row["dte"])
+                    sim_days = sim_c2.slider("天數經過", 0, _max_days, 0, 1,
+                                              key="sim_days",
+                                              help="假設過了幾天。Theta 會持續侵蝕時間價值。")
+                    sim_iv = sim_c3.slider("IV 變動 %", -30.0, 30.0, 0.0, 1.0,
+                                            key="sim_iv",
+                                            help="假設 IV 漲跌多少。財報後 IV 常 crush -30% 以上。")
+
+                    entry_premium = float(_picked_row["mid"])
+                    sim = opt.simulate_whatif(
+                        option_type=_ot,
+                        entry_premium=entry_premium,
+                        strike=float(_picked_row["strike"]),
+                        dte_now=int(_picked_row["dte"]),
+                        spot_now=spot,
+                        iv_now=float(_picked_row["impliedVolatility"]) if pd.notna(_picked_row["impliedVolatility"]) else 0.0,
+                        spot_pct_change=sim_spot,
+                        days_passed=sim_days,
+                        iv_pct_change=sim_iv,
+                    )
+
+                    rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+                    rcol1.metric("新股價", f"${sim['new_spot']:.2f}",
+                                 delta=f"{sim_spot:+.1f}%")
+                    rcol2.metric("合約新理論價", f"${sim['new_price']:.2f}",
+                                 delta=f"{sim['new_price'] - entry_premium:+.2f}")
+                    rcol3.metric("每口損益", f"${sim['pnl_per_contract']:+,.0f}",
+                                 delta_color="normal" if sim["pnl_per_contract"] >= 0 else "inverse",
+                                 delta=f"進場 ${entry_premium*100:.0f}")
+                    rcol4.metric("報酬率", f"{sim['return_pct']:+.1f}%",
+                                 delta_color="normal" if sim["return_pct"] >= 0 else "inverse")
+
+                    # ─── 到期日損益圖（Plotly） ───
+                    st.markdown("#### 📈 到期日損益曲線")
+                    st.caption("假設你今天進場，到了到期日，股價落在不同位置時的損益。"
+                               "**注意：到期前的損益會比這張圖溫和（時間價值還沒燒完）**。")
+                    try:
+                        import plotly.graph_objects as go
+                        prices, pnls = opt.expiration_pnl_curve(
+                            option_type=_ot,
+                            strike=float(_picked_row["strike"]),
+                            entry_premium=entry_premium,
+                            spot_now=spot,
+                            range_pct=25.0,
+                            num_points=60,
+                        )
+                        be_price = float(_picked_row["break_even"])
+                        max_loss = -entry_premium * 100
+
+                        fig = go.Figure()
+                        # P&L 曲線
+                        fig.add_trace(go.Scatter(
+                            x=prices, y=pnls, mode="lines",
+                            name="到期 P&L", line=dict(width=3),
+                            fill="tozeroy",
+                            fillcolor="rgba(0,200,0,0.08)" if _ot == "call" else "rgba(200,0,0,0.08)",
+                        ))
+                        # 0 軸
+                        fig.add_hline(y=0, line=dict(dash="dash", width=1, color="gray"))
+                        # 現價
+                        fig.add_vline(x=spot, line=dict(dash="dot", color="orange"),
+                                      annotation_text=f"現價 ${spot:.2f}", annotation_position="top")
+                        # 盈虧平衡
+                        fig.add_vline(x=be_price, line=dict(dash="dash", color="green"),
+                                      annotation_text=f"BE ${be_price:.2f}", annotation_position="bottom")
+                        # 行權價
+                        fig.add_vline(x=float(_picked_row["strike"]),
+                                      line=dict(dash="dot", color="blue"),
+                                      annotation_text=f"K ${_picked_row['strike']:.2f}",
+                                      annotation_position="top")
+                        fig.update_layout(
+                            xaxis_title="到期日股價 ($)",
+                            yaxis_title="損益 ($)",
+                            height=380,
+                            margin=dict(t=30, b=40, l=40, r=10),
+                            showlegend=False,
+                            annotations=[dict(
+                                x=spot * 0.78, y=max_loss, xref="x", yref="y",
+                                text=f"最大虧損 ${max_loss:.0f}", showarrow=False,
+                                font=dict(color="red", size=11),
+                            )],
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as _e:
+                        st.warning(f"⚠️ 損益圖渲染失敗：{_e}")
+
+                    # ─── 教學提示 ───
+                    with st.expander("💡 名詞解釋：Delta / Theta / IV / BE 是什麼？"):
+                        st.markdown("""
+- **Δ Delta**：股價 $1 變動 → 期權變多少。0.55 約等於「中獎機率 55%」。新手選 **0.45-0.65**。
+- **Θ Theta**：每過一天，期權跌多少（時間價值衰減）。**越接近 0 越好**。所以選 **DTE 21-45 天**，太短 Theta 吃光、太長資金占用。
+- **IV 隱含波動率**：市場對未來波動的預期。**IV 越高 → 期權越貴**。新手避開 IV > 50%。
+- **盈虧平衡點 (BE)**：到期股價要超過 BE 才賺錢。**Call BE = 行權價 + 權利金**；**Put BE = 行權價 - 權利金**。
+- **OI（Open Interest）未平倉量**：這口合約有多少張在市場上。**OI 大 = 流動性好、容易出場**。
+- **Bid/Ask 價差**：買賣價差。價差大代表你買進就賠掉滑價。買方要選價差 < 5%。
+                        """)

@@ -43,6 +43,203 @@ def _bs_d1_d2(S, K, T, r, sigma, q=0.0):
     return d1, d2
 
 
+def bs_price(option_type: str, S: float, K: float, T_days: float,
+             sigma: float, r: float = 0.045, q: float = 0.0) -> float:
+    """
+    Black-Scholes 理論價格。用於 What-if 模擬器重算合約現值。
+    參數同 bs_greeks。
+    """
+    T = T_days / 365.0
+    # 到期當日（含 T<=0）→ 直接回內含價值
+    if T <= 0:
+        if option_type == "call":
+            return max(S - K, 0.0)
+        return max(K - S, 0.0)
+
+    d1, d2 = _bs_d1_d2(S, K, T, r, sigma, q)
+    if d1 is None:
+        return 0.0
+
+    if option_type == "call":
+        return S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+    return K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
+
+
+def simulate_whatif(option_type: str, entry_premium: float,
+                    strike: float, dte_now: int, spot_now: float, iv_now: float,
+                    spot_pct_change: float, days_passed: int, iv_pct_change: float,
+                    risk_free: float = 0.045) -> dict:
+    """
+    What-if 模擬：給定一組「未來情境」，回傳合約新理論價格與損益。
+
+    Args:
+        option_type: 'call' or 'put'
+        entry_premium: 進場權利金（每股，例如 $5.30）
+        strike, dte_now, spot_now, iv_now: 進場時的合約屬性
+        spot_pct_change: 股價變動百分比（-10 ~ +10 表示 -10% ~ +10%）
+        days_passed: 經過了幾天（0 ~ dte_now）
+        iv_pct_change: IV 變動百分比（-30 ~ +30）
+
+    Returns:
+        {
+            'new_spot': 新股價,
+            'new_dte': 剩餘天數,
+            'new_iv': 新 IV（小數）,
+            'new_price': 合約新理論價,
+            'pnl_per_share': 每股損益,
+            'pnl_per_contract': 每口損益（×100）,
+            'return_pct': 報酬率%,
+        }
+    """
+    new_spot = spot_now * (1 + spot_pct_change / 100.0)
+    new_dte = max(dte_now - days_passed, 0)
+    new_iv = max(iv_now * (1 + iv_pct_change / 100.0), 0.001)
+
+    new_price = bs_price(option_type, new_spot, strike, new_dte, new_iv, risk_free)
+    pnl_per_share = new_price - entry_premium
+    return {
+        "new_spot": round(new_spot, 2),
+        "new_dte": new_dte,
+        "new_iv": round(new_iv, 4),
+        "new_price": round(new_price, 4),
+        "pnl_per_share": round(pnl_per_share, 4),
+        "pnl_per_contract": round(pnl_per_share * 100, 2),
+        "return_pct": round((pnl_per_share / entry_premium * 100) if entry_premium > 0 else 0.0, 2),
+    }
+
+
+def expiration_pnl_curve(option_type: str, strike: float, entry_premium: float,
+                         spot_now: float, range_pct: float = 25.0,
+                         num_points: int = 50) -> tuple[list[float], list[float]]:
+    """
+    產生到期日 P&L 曲線。
+
+    Returns:
+        (spot_prices, pnls_per_contract)
+        每點 = (該收盤價對應的到期損益 × 100)
+    """
+    low = spot_now * (1 - range_pct / 100.0)
+    high = spot_now * (1 + range_pct / 100.0)
+    step = (high - low) / max(num_points - 1, 1)
+    prices, pnls = [], []
+    for i in range(num_points):
+        s = low + step * i
+        if option_type == "call":
+            intrinsic = max(s - strike, 0.0)
+        else:
+            intrinsic = max(strike - s, 0.0)
+        pnl = (intrinsic - entry_premium) * 100  # 一口 = 100 股
+        prices.append(round(s, 2))
+        pnls.append(round(pnl, 2))
+    return prices, pnls
+
+
+def risk_checklist(option_type: str, strike: float, mid: float,
+                   delta: float, dte: int, iv: float,
+                   open_interest: int, volume: int,
+                   bid: float, ask: float) -> list[dict]:
+    """
+    買方進場前 6 項風險檢查。回傳清單，每項：
+        {key, label, status: '✅'|'⚠️'|'❌', detail}
+    最後可額外用 verdict() 整合成 GO/CAUTION/STOP。
+    """
+    items = []
+
+    # 1. 到期天數
+    if 21 <= dte <= 45:
+        items.append({"key": "dte", "label": "到期天數", "status": "✅",
+                      "detail": f"{dte} 天（21-45 是甜蜜點）"})
+    elif 14 <= dte < 21 or 45 < dte <= 60:
+        items.append({"key": "dte", "label": "到期天數", "status": "⚠️",
+                      "detail": f"{dte} 天（偏離 21-45 區間）"})
+    else:
+        items.append({"key": "dte", "label": "到期天數", "status": "❌",
+                      "detail": f"{dte} 天（{'太短，Theta 損耗快' if dte < 14 else '太長，資金占用久'}）"})
+
+    # 2. Delta
+    abs_d = abs(delta) if delta == delta else 0  # NaN check
+    if 0.45 <= abs_d <= 0.65:
+        items.append({"key": "delta", "label": "Delta 區間", "status": "✅",
+                      "detail": f"{delta:.2f}（0.45-0.65 性價比甜蜜點）"})
+    elif 0.30 <= abs_d < 0.45 or 0.65 < abs_d <= 0.75:
+        items.append({"key": "delta", "label": "Delta 區間", "status": "⚠️",
+                      "detail": f"{delta:.2f}（略偏 {'OTM' if abs_d < 0.45 else 'ITM'}）"})
+    else:
+        items.append({"key": "delta", "label": "Delta 區間", "status": "❌",
+                      "detail": f"{delta:.2f}（{'太 OTM 中獎率低' if abs_d < 0.30 else '太貴'}）"})
+
+    # 3. IV 高低
+    iv_pct = iv * 100
+    if iv_pct < 35:
+        items.append({"key": "iv", "label": "隱含波動率", "status": "✅",
+                      "detail": f"IV {iv_pct:.1f}%（不貴）"})
+    elif iv_pct < 50:
+        items.append({"key": "iv", "label": "隱含波動率", "status": "⚠️",
+                      "detail": f"IV {iv_pct:.1f}%（中等，注意 IV crush）"})
+    else:
+        items.append({"key": "iv", "label": "隱含波動率", "status": "❌",
+                      "detail": f"IV {iv_pct:.1f}%（過高，IV crush 風險大）"})
+
+    # 4. 流動性 - OI
+    oi = open_interest or 0
+    if oi >= 500:
+        items.append({"key": "oi", "label": "未平倉量 OI", "status": "✅",
+                      "detail": f"{oi:,}（流動性充足）"})
+    elif oi >= 100:
+        items.append({"key": "oi", "label": "未平倉量 OI", "status": "⚠️",
+                      "detail": f"{oi:,}（可接受）"})
+    else:
+        items.append({"key": "oi", "label": "未平倉量 OI", "status": "❌",
+                      "detail": f"{oi:,}（過低，難出場）"})
+
+    # 5. 流動性 - 今日量
+    vol = volume or 0
+    if vol >= 50:
+        items.append({"key": "vol", "label": "今日成交量", "status": "✅",
+                      "detail": f"{vol:,}"})
+    elif vol >= 10:
+        items.append({"key": "vol", "label": "今日成交量", "status": "⚠️",
+                      "detail": f"{vol:,}（偏少）"})
+    else:
+        items.append({"key": "vol", "label": "今日成交量", "status": "❌",
+                      "detail": f"{vol:,}（極低）"})
+
+    # 6. Bid/Ask 價差
+    if bid and ask and ask > 0:
+        spread_pct = (ask - bid) / ask * 100
+        if spread_pct < 5:
+            items.append({"key": "spread", "label": "Bid/Ask 價差", "status": "✅",
+                          "detail": f"{spread_pct:.1f}%（緊）"})
+        elif spread_pct < 12:
+            items.append({"key": "spread", "label": "Bid/Ask 價差", "status": "⚠️",
+                          "detail": f"{spread_pct:.1f}%（可接受）"})
+        else:
+            items.append({"key": "spread", "label": "Bid/Ask 價差", "status": "❌",
+                          "detail": f"{spread_pct:.1f}%（過寬，滑價大）"})
+    else:
+        items.append({"key": "spread", "label": "Bid/Ask 價差", "status": "❌",
+                      "detail": "無有效 Bid/Ask"})
+
+    return items
+
+
+def verdict(checklist: list[dict]) -> dict:
+    """根據檢查清單給整體判定。"""
+    fails = sum(1 for it in checklist if it["status"] == "❌")
+    warns = sum(1 for it in checklist if it["status"] == "⚠️")
+    if fails >= 2:
+        return {"light": "❌", "label": "STOP",
+                "msg": f"{fails} 項紅燈，建議放棄這口合約另尋目標"}
+    if fails == 1:
+        return {"light": "⚠️", "label": "CAUTION",
+                "msg": "有 1 項紅燈，建議檢視後再決定，或調整合約參數"}
+    if warns >= 3:
+        return {"light": "⚠️", "label": "CAUTION",
+                "msg": f"{warns} 項黃燈，整體勉強但非最佳選擇"}
+    return {"light": "✅", "label": "GO",
+            "msg": "通過買方進場 6 項檢查，可考慮下單（仍需依個人風控評估）"}
+
+
 def bs_greeks(option_type: str, S: float, K: float, T_days: float,
               sigma: float, r: float = 0.045, q: float = 0.0) -> dict:
     """
