@@ -67,6 +67,42 @@ def get_sox_tickers():
             "NXPI", "ON", "QCOM", "RMBS", "SWKS", "STM", "SYNA", "TER", "TXN",
             "TSM", "WDC", "WOLF"]
 
+
+def get_etf_tickers():
+    """常用 ETF 清單：大盤 / 板塊 / 主題 / 國際 / 債券 / 商品"""
+    print("🔍 載入常用 ETF 清單...")
+    return [
+        # 大盤 / 廣基
+        "SPY", "VOO", "IVV", "QQQ", "QQQM", "DIA", "IWM", "VTI", "ITOT", "RSP",
+        # SPDR 板塊（SP500 11 大類）
+        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC",
+        # 科技 / 半導體 / AI
+        "SOXX", "SMH", "SOXL", "VGT", "XSD", "QTUM", "BOTZ", "ROBO", "AIQ",
+        # 主題 / 創新
+        "ARKK", "ARKQ", "ARKW", "ARKG", "ARKF",
+        # 國際
+        "VEA", "VWO", "EFA", "EEM", "IEFA", "IEMG",
+        "FXI", "KWEB", "MCHI", "ASHR",     # 中國
+        "EWJ", "DXJ",                       # 日本
+        "INDA", "INDY",                     # 印度
+        "EWZ",                              # 巴西
+        "EWY",                              # 韓國
+        # 債券
+        "TLT", "IEF", "SHY", "BND", "AGG", "HYG", "LQD", "JNK", "TIP",
+        # 商品 / 黃金
+        "GLD", "IAU", "SLV", "USO", "UNG", "DBC",
+        # 高股息 / 防禦
+        "SCHD", "VYM", "DVY", "HDV", "NOBL",
+        # 房地產
+        "VNQ", "IYR",
+        # 槓桿 / 反向（給可能會用的人）
+        "TQQQ", "SQQQ", "SPXL", "SPXS", "UVXY", "VXX",
+        # 主題 / 產業
+        "IBB", "XBI", "XME", "ITA", "JETS", "ICLN", "TAN", "LIT", "URA",
+        # 加密
+        "IBIT", "FBTC", "BITO", "ETHE",
+    ]
+
 def _flatten(data, tickers_list):
     """yf.download 結果 → long format DataFrame"""
     if data is None or data.empty:
@@ -96,14 +132,18 @@ def _flatten(data, tickers_list):
 
 def main():
     print("=" * 60)
-    print("🌟 美股黃金選股池增量快取更新 (S&P 500 + NDX + SP400 + SOX)")
+    print("🌟 美股黃金選股池增量快取更新 (S&P 500 + NDX + SP400 + SOX + ETFs)")
     print("=" * 60)
 
     output_file = CACHE_DIR / "us_daily.parquet"
     today = pd.Timestamp.now().normalize()
 
     # === 1. 取得最新成分股清單 ===
-    tickers = list(set(get_sp500_tickers() + get_nasdaq100_tickers() + get_sp400_tickers() + get_sox_tickers()))
+    tickers = list(set(
+        get_sp500_tickers() + get_nasdaq100_tickers()
+        + get_sp400_tickers() + get_sox_tickers()
+        + get_etf_tickers()
+    ))
     tickers = sorted([t for t in tickers if isinstance(t, str) and t.strip()])
     print(f"\n📋 目標成分股共 {len(tickers)} 檔")
 
