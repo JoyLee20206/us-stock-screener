@@ -1575,13 +1575,15 @@ with _tab_opt:
                 )
 
                 # ─── Bid/Ask 報價健康度檢測（盤後常見 $0 提示）───
-                # 防呆：若 options_data.py 未同步更新仍能執行
-                try:
-                    _qh_call = opt.chain_quote_health(view["calls"])
-                    _qh_put = opt.chain_quote_health(view["puts"])
-                except AttributeError:
-                    _qh_call = {"zero_pct": 0.0, "is_after_hours_data": False}
-                    _qh_put = {"zero_pct": 0.0, "is_after_hours_data": False}
+                # 防呆：若 options_data.py 未同步更新、或檢測函式有錯，整段都安全跳過
+                _qh_call = {"zero_pct": 0.0, "is_after_hours_data": False}
+                _qh_put = {"zero_pct": 0.0, "is_after_hours_data": False}
+                if hasattr(opt, "chain_quote_health"):
+                    try:
+                        _qh_call = opt.chain_quote_health(view["calls"])
+                        _qh_put = opt.chain_quote_health(view["puts"])
+                    except Exception:
+                        pass
                 if _qh_call["is_after_hours_data"] or _qh_put["is_after_hours_data"]:
                     st.info(
                         f"💡 **Bid/Ask 多為 $0**（Call 占 {_qh_call['zero_pct']}%、Put 占 {_qh_put['zero_pct']}%）"
