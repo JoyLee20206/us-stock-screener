@@ -1338,7 +1338,7 @@ with _tab_opt:
                 _cd_str = "、".join(f"{s} {sec}s" for s, sec in _cd.items())
                 st.caption(f"⏳ 冷卻中的資料源：{_cd_str}（已被限流/付費鎖，跳過避免浪費呼叫）")
             else:
-                st.caption("✅ 所有資料源待命中。期權鏈資料優先讀 6 小時內的磁碟快取。")
+                st.caption("✅ 所有資料源待命中。期權鏈資料優先讀 24 小時內的磁碟快取 + 每日全鏈快照備援。")
         with _btn_cols[1]:
             if st.button("🔄 強制刷新", key="opt_force_refresh",
                          help="清掉期權鏈磁碟快取 + 解除所有 source 冷卻，下次查詢重抓"):
