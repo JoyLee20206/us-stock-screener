@@ -345,37 +345,7 @@ def _md_option_chain(ticker: str, expiration: str
         "option_type": [str(s or "").lower() for s in sides],
         "dte": [int(x or 0) for x in col("dte")],
     })
-    # underlyingPrice 用來在 IV 缺失/異常時反推
-    _under_list = j.get("underlyingPrice") or []
-    spot_in_response = float(_under_list[0]) if _under_list else 0.0
-
-    # MarketData cached 在盤後常見兩種異常：
-    #   (1) IV 全 0（沒給）
-    #   (2) IV 異常低（< 5%）或異常高（> 300%）—— 對美股一年期權都不合理
-    # 兩種情況都用 lastPrice 反推（Black-Scholes Newton）讓 Delta/Theta 正常
-    _PLAUSIBLE_LO, _PLAUSIBLE_HI = 0.05, 3.0
-    if spot_in_response > 0 and (df["lastPrice"] > 0).any():
-        fixed = []
-        for _, r in df.iterrows():
-            iv = r["impliedVolatility"]
-            # 合理區間 → 沿用 MarketData 給的值
-            if _PLAUSIBLE_LO <= iv <= _PLAUSIBLE_HI:
-                fixed.append(iv)
-                continue
-            # 不合理 → 從 lastPrice 反推
-            if r["lastPrice"] <= 0 or r["dte"] <= 0:
-                fixed.append(iv)
-                continue
-            iv_est = implied_vol_from_price(
-                option_type=r["option_type"],
-                S=spot_in_response,
-                K=float(r["strike"]),
-                T_days=int(r["dte"]),
-                market_price=float(r["lastPrice"]),
-            )
-            # 反推也回 0 → 保留原值（避免製造假數據）
-            fixed.append(iv_est if iv_est > 0 else iv)
-        df["impliedVolatility"] = fixed
+    # 註：IV 異常修補已統一移到 enrich_chain，所有資料源（含 yfinance）共用
 
     if df.empty:
         return df, df
@@ -495,6 +465,41 @@ def bs_price(option_type: str, S: float, K: float, T_days: float,
     if option_type == "call":
         return S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
     return K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
+
+
+def is_us_market_open() -> bool:
+    """
+    判斷美股是否在常規交易時段(粗略估算,不考慮國定假日)。
+    Regular Trading Hours: ET 09:30–16:00, Mon–Fri.
+    June 屬於 EDT(UTC-4),其他時段忽略 DST 轉換的兩天誤差。
+    """
+    try:
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        # 簡化:全年用 EDT(UTC-4),冬季會有 1 小時誤差,但對交易時段判斷足夠
+        et_now = _dt.now(_tz.utc) - _td(hours=4)
+        if et_now.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        hour_decimal = et_now.hour + et_now.minute / 60.0
+        return 9.5 <= hour_decimal < 16.0
+    except Exception:
+        return True  # 偵測失敗時假設開盤,讓正常流程跑
+
+
+def us_market_status_msg() -> str | None:
+    """休市時回傳警告訊息;開盤時回 None"""
+    if is_us_market_open():
+        return None
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    try:
+        et_now = _dt.now(_tz.utc) - _td(hours=4)
+        if et_now.weekday() >= 5:
+            return "🌙 美股週末休市中(下次開盤:週一台灣晚上 21:30)"
+        h = et_now.hour
+        if h < 9 or (h == 9 and et_now.minute < 30):
+            return "🌅 美股盤前時段(開盤:台灣晚上 21:30)"
+        return "🌃 美股盤後時段(明日開盤:台灣晚上 21:30)"
+    except Exception:
+        return "🌙 美股休市中"
 
 
 def implied_vol_from_price(option_type: str, S: float, K: float, T_days: float,
@@ -1370,6 +1375,43 @@ def enrich_chain(df: pd.DataFrame, option_type: str, spot_price: float,
         else r.get("lastPrice", 0),
         axis=1,
     )
+
+    # ============================================================
+    # IV 修補：盤後 yfinance / cached endpoint 的 IV 常常缺失或異常
+    # 從市價(mid)反推 IV，讓 Greeks/Delta/⭐ 標籤系統至少能運作
+    # （反推值不精準，但比直接 IV=0 退化成 step function 強）
+    # ============================================================
+    _PLAUSIBLE_LO, _PLAUSIBLE_HI = 0.05, 3.0
+    _iv_was_repaired = False
+    if (df["mid"] > 0).any() and spot_price > 0:
+        new_ivs = []
+        for _, r in df.iterrows():
+            iv = r.get("impliedVolatility", 0) or 0
+            try:
+                iv = float(iv)
+            except Exception:
+                iv = 0.0
+            # 合理區間 → 用原值
+            if _PLAUSIBLE_LO <= iv <= _PLAUSIBLE_HI:
+                new_ivs.append(iv)
+                continue
+            # 不合理 → 從 mid 反推
+            mid = float(r.get("mid", 0) or 0)
+            K = float(r.get("strike", 0) or 0)
+            if mid <= 0 or K <= 0:
+                new_ivs.append(iv)
+                continue
+            iv_est = implied_vol_from_price(
+                option_type=option_type,
+                S=spot_price, K=K, T_days=dte, market_price=mid,
+            )
+            if iv_est > 0:
+                new_ivs.append(iv_est)
+                _iv_was_repaired = True
+            else:
+                new_ivs.append(iv)
+        df["impliedVolatility"] = new_ivs
+    df.attrs["iv_was_repaired"] = _iv_was_repaired
 
     # Greeks（逐列計算）
     greeks_list = []

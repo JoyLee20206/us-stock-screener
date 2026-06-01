@@ -1087,6 +1087,16 @@ with _tab_opt:
     else:
         st.caption("從選股結果挑一檔輸入，查看可用合約 + 智能標籤 + Greeks。新手請優先看 ⭐ 推薦標籤。")
 
+        # ─── 美股盤後/週末提示橫條 ───
+        _mkt_msg = opt.us_market_status_msg()
+        if _mkt_msg:
+            st.info(
+                f"{_mkt_msg}　**目前看到的是上次收盤的快照**。\n\n"
+                f"盤後常見現象：**Bid/Ask = $0、IV 缺失、OI 顯示 0** —— 這是 yfinance 對盤後資料的限制，不是程式 bug。\n\n"
+                f"系統會用「**從中價反推 IV**」(Black-Scholes Newton 法) 讓 ⭐ 推薦標籤、Delta、Theta 仍能運作，"
+                f"但反推值與真實 IV 會有 5-15% 誤差。**想看最準確資料請在台灣晚上 21:30 美股開盤後查詢。**"
+            )
+
         # ─── 使用說明（預設收起，新手點開看）───
         with st.expander("📖 使用說明（第一次來請點開）", expanded=False):
             st.markdown("""
@@ -1283,8 +1293,13 @@ with _tab_opt:
             # 過期資料警示：fetch_option_chain 在「所有來源都失敗時」會回過期磁碟快取
             try:
                 _stale_h = view.get("calls").attrs.get("stale_hours") if view.get("calls") is not None else None
+                _iv_repaired = (view.get("calls") is not None and view["calls"].attrs.get("iv_was_repaired")) or \
+                               (view.get("puts") is not None and view["puts"].attrs.get("iv_was_repaired"))
             except Exception:
                 _stale_h = None
+                _iv_repaired = False
+            if _iv_repaired and not _stale_h:
+                st.caption("🔧 偵測到部分合約 IV 缺失或異常，已用 Black-Scholes Newton 法從中價反推（誤差 5-15%，僅供參考）。")
             if _stale_h:
                 st.warning(
                     f"📁 **目前顯示的是 {_stale_h} 小時前的快取資料**。"
