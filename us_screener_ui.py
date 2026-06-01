@@ -1256,11 +1256,18 @@ with _tab_opt:
             help="輸入美股代號（例如 NVDA、SPY、AAPL）。新手建議從 SPY、QQQ 等 ETF 開始。",
         ).strip().upper()
 
-        # 抓到期日清單
+        # 抓到期日清單（即時失敗時 fallback 到背景快照）
         expirations = []
+        _from_snapshot_list = False
         if opt_ticker:
             with st.spinner(f"載入 {opt_ticker} 可選到期日..."):
                 expirations = opt.list_expirations(opt_ticker)
+            # 即時抓不到 → 試背景快照
+            if not expirations:
+                _snap_exps = opt.snapshot_available_expirations(opt_ticker)
+                if _snap_exps:
+                    expirations = _snap_exps
+                    _from_snapshot_list = True
 
         if not expirations:
             _err = opt.last_expirations_error(opt_ticker) if opt_ticker else None
@@ -1268,7 +1275,9 @@ with _tab_opt:
                 "HTTP 403", "HTTP 402", "YFRateLimitError", "Rate limited"
             ])
             if _is_cloud_dead:
-                ocol2.warning("⚠️ 雲端版無法抓取到期日，請本機執行 `streamlit run us_screener_ui.py`")
+                ocol2.warning(f"⚠️ 雲端版無法抓取到期日，且 **{opt_ticker} 不在背景快照名單內**。"
+                              "請本機執行 `streamlit run us_screener_ui.py`，"
+                              "或改查 WATCHLIST 內的 45 檔（SPY/QQQ/NVDA/AAPL 等）。")
                 with ocol2.expander("🔧 工程細節", expanded=False):
                     st.code(_err)
             elif _err:
@@ -1297,12 +1306,17 @@ with _tab_opt:
                     st.session_state["opt_expiration"] = _pending
                     default_idx = expirations.index(_pending)
 
+            _label = "到期日（預設選最接近 30 天）"
+            if _from_snapshot_list:
+                _label = "到期日 📸（來自背景快照，僅 60 天內 ATM ±20%）"
             opt_expiration = ocol2.selectbox(
-                "到期日（預設選最接近 30 天）",
+                _label,
                 options=expirations,
                 index=default_idx,
                 key="opt_expiration",
-                help="期權買方甜蜜點是 21-45 天。太短 Theta 損耗快、太長資金占用久。",
+                help="期權買方甜蜜點是 21-45 天。太短 Theta 損耗快、太長資金占用久。"
+                     + ("\n\n本次到期日清單來自背景每日快照（即時 yfinance 抓取失敗）。"
+                        if _from_snapshot_list else ""),
             )
 
         run_options = ocol3.button("🔍 查詢", type="primary", use_container_width=True, key="opt_run")
@@ -1373,7 +1387,16 @@ with _tab_opt:
                     "HTTP 403", "HTTP 402", "YFRateLimitError", "Rate limited"
                 ])
                 if _is_cloud_dead:
-                    st.error("⚠️ 雲端版無法抓取期權鏈")
+                    # 額外診斷：檢查快照是否存在
+                    _snap_exps = opt.snapshot_available_expirations(opt_ticker) if OPTIONS_AVAILABLE else []
+                    if _snap_exps:
+                        st.error(f"⚠️ 即時資料抓取失敗，但**找到背景快照**（共 {len(_snap_exps)} 個到期）")
+                        st.warning(f"📸 快照有的到期日：{', '.join(_snap_exps[:8])}"
+                                   f"{'...' if len(_snap_exps) > 8 else ''}\n\n"
+                                   f"你選的 **{opt_expiration}** 不在快照範圍內。"
+                                   f"請改選上方任一個。")
+                    else:
+                        st.error(f"⚠️ 雲端版無法抓取期權鏈（{opt_ticker} 也沒有背景快照）")
                     st.info(
                         "💡 **解法：本機執行**\n\n"
                         "在你的電腦終端機切到專案目錄，執行：\n"
