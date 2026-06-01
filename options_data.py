@@ -125,7 +125,29 @@ def _md_option_chain(ticker: str, expiration: str
         "impliedVolatility": [float(x or 0) for x in col("iv")],
         "contractSymbol": col("optionSymbol", ""),
         "option_type": [str(s or "").lower() for s in sides],
+        "dte": [int(x or 0) for x in col("dte")],
     })
+    # underlyingPrice 用來在 IV 缺失時反推
+    _under_list = j.get("underlyingPrice") or []
+    spot_in_response = float(_under_list[0]) if _under_list else 0.0
+
+    # 盤後 cached 常常 IV 全為 0 → 從 lastPrice 反推（Black-Scholes Newton）
+    if spot_in_response > 0 and (df["impliedVolatility"] <= 0).all() and (df["lastPrice"] > 0).any():
+        fixed = []
+        for _, r in df.iterrows():
+            if r["impliedVolatility"] > 0 or r["lastPrice"] <= 0 or r["dte"] <= 0:
+                fixed.append(r["impliedVolatility"])
+                continue
+            iv_est = implied_vol_from_price(
+                option_type=r["option_type"],
+                S=spot_in_response,
+                K=float(r["strike"]),
+                T_days=int(r["dte"]),
+                market_price=float(r["lastPrice"]),
+            )
+            fixed.append(iv_est)
+        df["impliedVolatility"] = fixed
+
     if df.empty:
         return df, df
     df_call = df[df["option_type"] == "call"].drop(columns=["option_type"]).reset_index(drop=True)
@@ -244,6 +266,44 @@ def bs_price(option_type: str, S: float, K: float, T_days: float,
     if option_type == "call":
         return S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
     return K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
+
+
+def implied_vol_from_price(option_type: str, S: float, K: float, T_days: float,
+                            market_price: float, r: float = 0.045,
+                            initial_sigma: float = 0.30,
+                            max_iter: int = 60, tol: float = 1e-5) -> float:
+    """
+    用 Newton 法從市價反推 IV（Black-Scholes）。
+    用途：MarketData.app cached 免費版在盤後不回 IV，但 lastPrice 有，
+          可從中價反推 IV，讓 Greeks / Delta 標籤系統正常運作。
+
+    回 0 表示無法收斂（如 deep ITM 沒有時間價值、或市價低於內含價值）。
+    """
+    T = T_days / 365.0
+    if T <= 0 or market_price <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    # 內含價值，市價 < intrinsic → 無解（資料異常）
+    intrinsic = max(S - K, 0.0) if option_type == "call" else max(K - S, 0.0)
+    if market_price < intrinsic * 0.95:
+        return 0.0
+    sigma = max(initial_sigma, 0.05)
+    for _ in range(max_iter):
+        d1, d2 = _bs_d1_d2(S, K, T, r, sigma)
+        if d1 is None:
+            return 0.0
+        if option_type == "call":
+            theo = S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+        else:
+            theo = K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+        vega = S * _norm_pdf(d1) * math.sqrt(T)  # 每 1.0 sigma 的價格變化
+        if vega < 1e-8:
+            return 0.0
+        diff = theo - market_price
+        if abs(diff) < tol:
+            return max(0.001, min(sigma, 5.0))
+        sigma -= diff / vega
+        sigma = max(0.001, min(sigma, 5.0))  # 夾在合理範圍避免發散
+    return max(0.001, min(sigma, 5.0))
 
 
 def simulate_whatif(option_type: str, entry_premium: float,
