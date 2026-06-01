@@ -127,16 +127,26 @@ def _md_option_chain(ticker: str, expiration: str
         "option_type": [str(s or "").lower() for s in sides],
         "dte": [int(x or 0) for x in col("dte")],
     })
-    # underlyingPrice 用來在 IV 缺失時反推
+    # underlyingPrice 用來在 IV 缺失/異常時反推
     _under_list = j.get("underlyingPrice") or []
     spot_in_response = float(_under_list[0]) if _under_list else 0.0
 
-    # 盤後 cached 常常 IV 全為 0 → 從 lastPrice 反推（Black-Scholes Newton）
-    if spot_in_response > 0 and (df["impliedVolatility"] <= 0).all() and (df["lastPrice"] > 0).any():
+    # MarketData cached 在盤後常見兩種異常：
+    #   (1) IV 全 0（沒給）
+    #   (2) IV 異常低（< 5%）或異常高（> 300%）—— 對美股一年期權都不合理
+    # 兩種情況都用 lastPrice 反推（Black-Scholes Newton）讓 Delta/Theta 正常
+    _PLAUSIBLE_LO, _PLAUSIBLE_HI = 0.05, 3.0
+    if spot_in_response > 0 and (df["lastPrice"] > 0).any():
         fixed = []
         for _, r in df.iterrows():
-            if r["impliedVolatility"] > 0 or r["lastPrice"] <= 0 or r["dte"] <= 0:
-                fixed.append(r["impliedVolatility"])
+            iv = r["impliedVolatility"]
+            # 合理區間 → 沿用 MarketData 給的值
+            if _PLAUSIBLE_LO <= iv <= _PLAUSIBLE_HI:
+                fixed.append(iv)
+                continue
+            # 不合理 → 從 lastPrice 反推
+            if r["lastPrice"] <= 0 or r["dte"] <= 0:
+                fixed.append(iv)
                 continue
             iv_est = implied_vol_from_price(
                 option_type=r["option_type"],
@@ -145,7 +155,8 @@ def _md_option_chain(ticker: str, expiration: str
                 T_days=int(r["dte"]),
                 market_price=float(r["lastPrice"]),
             )
-            fixed.append(iv_est)
+            # 反推也回 0 → 保留原值（避免製造假數據）
+            fixed.append(iv_est if iv_est > 0 else iv)
         df["impliedVolatility"] = fixed
 
     if df.empty:
