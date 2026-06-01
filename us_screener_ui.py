@@ -1215,17 +1215,17 @@ with _tab_opt:
 
         if not expirations:
             _err = opt.last_expirations_error(opt_ticker) if opt_ticker else None
-            if _err:
+            _is_cloud_dead = bool(_err) and any(s in _err for s in [
+                "HTTP 403", "HTTP 402", "YFRateLimitError", "Rate limited"
+            ])
+            if _is_cloud_dead:
+                ocol2.warning("⚠️ 雲端版無法抓取到期日，請本機執行 `streamlit run us_screener_ui.py`")
+                with ocol2.expander("🔧 工程細節", expanded=False):
+                    st.code(_err)
+            elif _err:
                 ocol2.warning(f"⚠️ 無法取得到期日：{_err}")
             else:
                 ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
-            # 顯示資料源狀態，方便排查 rate limit 問題
-            try:
-                ocol2.caption(f"🔧 Finnhub：{opt.finnhub_status()}")
-                ocol2.caption(f"🔧 MarketData：{opt.marketdata_status()}")
-                ocol2.caption(f"🔧 yfinance session：{opt.yf_session_status()}")
-            except Exception:
-                pass
             opt_expiration = None
         else:
             # 預設選第 2 個（避開週選常見的高 Theta 風險）
@@ -1248,10 +1248,26 @@ with _tab_opt:
 
         run_options = ocol3.button("🔍 查詢", type="primary", use_container_width=True, key="opt_run")
 
+        # 顯示快取/冷卻狀態 + 強制刷新按鈕
+        _cd = opt.cooldown_status()
+        _btn_cols = st.columns([4, 1])
+        with _btn_cols[0]:
+            if _cd:
+                _cd_str = "、".join(f"{s} {sec}s" for s, sec in _cd.items())
+                st.caption(f"⏳ 冷卻中的資料源：{_cd_str}（已被限流/付費鎖，跳過避免浪費呼叫）")
+            else:
+                st.caption("✅ 所有資料源待命中。期權鏈資料優先讀 6 小時內的磁碟快取。")
+        with _btn_cols[1]:
+            if st.button("🔄 強制刷新", key="opt_force_refresh",
+                         help="清掉期權鏈磁碟快取 + 解除所有 source 冷卻，下次查詢重抓"):
+                _n = opt.clear_options_cache()
+                st.success(f"✓ 已清 {_n} 個快取檔，冷卻已解除")
+                st.rerun()
+
         # 用 session_state 保存查詢結果，避免互動 slider 時整段消失
         _cache_key = (opt_ticker, opt_expiration)
         if run_options and opt_ticker and opt_expiration:
-            with st.spinner(f"抓取 {opt_ticker} {opt_expiration} 期權鏈..."):
+            with st.spinner(f"抓取 {opt_ticker} {opt_expiration} 期權鏈（雲端可能需要重試 1-2 次）..."):
                 _view = opt.build_buyer_view(opt_ticker, opt_expiration, df_daily=df_daily)
             st.session_state["opt_view"] = _view
             st.session_state["opt_view_key"] = _cache_key
@@ -1264,8 +1280,39 @@ with _tab_opt:
             view = None
 
         if view is not None:
+            # 過期資料警示：fetch_option_chain 在「所有來源都失敗時」會回過期磁碟快取
+            try:
+                _stale_h = view.get("calls").attrs.get("stale_hours") if view.get("calls") is not None else None
+            except Exception:
+                _stale_h = None
+            if _stale_h:
+                st.warning(
+                    f"📁 **目前顯示的是 {_stale_h} 小時前的快取資料**。"
+                    f"所有即時資料源都失敗（限流或付費鎖），暫時用磁碟舊資料維持基本可讀性。"
+                    f"想看最新資料請按上面的「🔄 強制刷新」或稍後再試。"
+                )
             if "error" in view:
-                st.error(f"⚠️ {view['error']}")
+                _err_str = str(view['error'])
+                # 偵測「雲端三來源都失敗」的典型錯誤組合 → 顯示友善提示
+                _is_cloud_dead = any(s in _err_str for s in [
+                    "HTTP 403", "HTTP 402", "YFRateLimitError", "Rate limited"
+                ])
+                if _is_cloud_dead:
+                    st.error("⚠️ 雲端版無法抓取期權鏈")
+                    st.info(
+                        "💡 **解法：本機執行**\n\n"
+                        "在你的電腦終端機切到專案目錄，執行：\n"
+                        "```\nstreamlit run us_screener_ui.py\n```\n"
+                        "本機 IP 不在 Yahoo 限流名單，**期權瀏覽功能完全正常**。\n\n"
+                        "**為什麼雲端不行？**  \n"
+                        "免費期權資料源都鎖在付費版（Finnhub Premium / MarketData Trader / Polygon Options），"
+                        "yfinance 雖然免費但 Streamlit Cloud 共用 IP 被 Yahoo 整批限流。\n\n"
+                        "**不影響雲端其他功能**：選股、回測、持倉、教學頁籤都正常運作。"
+                    )
+                    with st.expander("🔧 工程細節（除錯用）", expanded=False):
+                        st.code(_err_str)
+                else:
+                    st.error(f"⚠️ {view['error']}")
             else:
                 # ⚠️ 跨財報全域警示橫條 + 「改選財報後到期」按鈕
                 if view.get("crosses_earnings"):

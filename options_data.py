@@ -13,15 +13,106 @@ options_data.py — 美股期權鏈抓取 + Black-Scholes Greeks + 智能標籤
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
 from datetime import datetime, date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+
+# ============================================================
+# 磁碟快取 + 智能冷卻（雲端 yfinance 限流的補強）
+# ============================================================
+DISK_CACHE_DIR = Path("cache/options")
+DISK_FRESH_HOURS = 6          # 6 小時內視為新鮮，直接用不打 API
+COOLDOWN_429_SEC = 300        # 被限流後冷卻 5 分鐘
+COOLDOWN_PREMIUM_SEC = 3600   # 403/402 視為永久鎖（session 內 1 小時不再試）
+
+_source_cooldown: dict[str, float] = {}  # source → 解除時間（unix）
+
+
+def _cooldown_remaining(source: str) -> int:
+    """回傳冷卻剩餘秒數（0 表示已解除）"""
+    until = _source_cooldown.get(source, 0)
+    return max(0, int(until - time.time()))
+
+
+def _mark_cooldown(source: str, duration_sec: int) -> None:
+    _source_cooldown[source] = time.time() + duration_sec
+
+
+def _classify_error_and_cooldown(source: str, err: str) -> None:
+    """根據錯誤訊息決定冷卻時長"""
+    if not err:
+        return
+    if "HTTP 403" in err or "HTTP 402" in err or "Payment" in err:
+        _mark_cooldown(source, COOLDOWN_PREMIUM_SEC)
+    elif "HTTP 429" in err or "Rate limit" in err or "Too Many Requests" in err:
+        _mark_cooldown(source, COOLDOWN_429_SEC)
+    # 其他暫時錯誤不冷卻，下次重試
+
+
+def _disk_paths(ticker: str, expiration: str) -> Path:
+    DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    safe = f"{ticker}_{expiration}".replace("/", "_")
+    return DISK_CACHE_DIR / f"{safe}.parquet"
+
+
+def _disk_read(ticker: str, expiration: str
+               ) -> tuple[pd.DataFrame, pd.DataFrame, float] | None:
+    """讀磁碟快取。回傳 (df_call, df_put, mtime) 或 None"""
+    p = _disk_paths(ticker, expiration)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        mtime = p.stat().st_mtime
+        df_call = df[df["_kind"] == "call"].drop(columns=["_kind"]).reset_index(drop=True)
+        df_put = df[df["_kind"] == "put"].drop(columns=["_kind"]).reset_index(drop=True)
+        return df_call, df_put, mtime
+    except Exception:
+        return None
+
+
+def _disk_write(ticker: str, expiration: str,
+                df_call: pd.DataFrame, df_put: pd.DataFrame) -> None:
+    try:
+        c = df_call.copy()
+        c["_kind"] = "call"
+        p = df_put.copy()
+        p["_kind"] = "put"
+        combined = pd.concat([c, p], ignore_index=True)
+        combined.to_parquet(_disk_paths(ticker, expiration))
+    except Exception:
+        pass
+
+
+def clear_options_cache() -> int:
+    """清空所有磁碟+記憶體快取，回傳清掉的檔案數"""
+    n = 0
+    if DISK_CACHE_DIR.exists():
+        for p in DISK_CACHE_DIR.glob("*.parquet"):
+            try:
+                p.unlink()
+                n += 1
+            except Exception:
+                pass
+    _exp_cache.clear()
+    _chain_cache.clear()
+    _fh_chain_full_cache.clear() if "_fh_chain_full_cache" in globals() else None
+    _source_cooldown.clear()
+    return n
+
+
+def cooldown_status() -> dict[str, int]:
+    """回傳各 source 的冷卻剩餘秒數，供 UI 顯示"""
+    return {s: _cooldown_remaining(s) for s in ("finnhub", "marketdata", "yfinance")
+            if _cooldown_remaining(s) > 0}
 
 # ============================================================
 # Finnhub API（首選資料源，60 calls/min 免費版）
@@ -1150,57 +1241,100 @@ def get_spot_price(ticker: str) -> float | None:
 
 def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    抓取指定到期日的 Call + Put 鏈。Tradier 優先、yfinance fallback。10 分鐘 TTL 快取。
+    抓取指定到期日的 Call + Put 鏈。
 
-    Returns:
-        (df_call, df_put)：兩個 DataFrame，欄位包含
-        strike, lastPrice, bid, ask, impliedVolatility, openInterest, volume
+    完整流程（雲端強化版）：
+      1. 10 分鐘記憶體快取（同 Streamlit session 重複查詢用）
+      2. 6 小時磁碟快取（同程序重啟前的查詢結果）
+      3. 試 Finnhub → MarketData → yfinance（各 source 冷卻中跳過）
+         yfinance 失敗 + 非限流 → 等 3s 再試一次
+      4. 全失敗 → 用磁碟舊資料（含過期），UI 顯示「資料 X 小時前」
+      5. 完全沒舊資料 → raise
     """
     key = (ticker, expiration)
+
+    # 1. 記憶體快取
     cached = _cache_get(_chain_cache, key)
     if cached is not None:
-        df_c, df_p = cached
+        return cached[0].copy(), cached[1].copy()
+
+    # 2. 磁碟快取（新鮮）
+    disk = _disk_read(ticker, expiration)
+    if disk is not None:
+        df_c, df_p, mtime = disk
+        if time.time() - mtime < DISK_FRESH_HOURS * 3600:
+            _cache_set(_chain_cache, key, (df_c, df_p))
+            return df_c.copy(), df_p.copy()
+
+    # 3. 跑 API 來源
+    errors: list[str] = []
+
+    def _save_and_return(df_c, df_p):
+        _disk_write(ticker, expiration, df_c, df_p)
+        _cache_set(_chain_cache, key, (df_c, df_p))
         return df_c.copy(), df_p.copy()
 
-    # 1. Finnhub 優先
-    fh_error = None
+    # 3a. Finnhub（冷卻中跳過）
     if _FH_AVAILABLE:
-        tr = _fh_option_chain(ticker, expiration)
-        if tr is not None:
-            df_call, df_put = tr
-            if not df_call.empty or not df_put.empty:
-                _cache_set(_chain_cache, key, (df_call, df_put))
-                return df_call.copy(), df_put.copy()
-        fh_error = _FH_LAST_ERROR
+        cd = _cooldown_remaining("finnhub")
+        if cd > 0:
+            errors.append(f"Finnhub：冷卻中（{cd}s 後解除）")
+        else:
+            tr = _fh_option_chain(ticker, expiration)
+            if tr is not None and (not tr[0].empty or not tr[1].empty):
+                return _save_and_return(tr[0], tr[1])
+            if _FH_LAST_ERROR:
+                _classify_error_and_cooldown("finnhub", _FH_LAST_ERROR)
+                errors.append(f"Finnhub：{_FH_LAST_ERROR}")
 
-    # 2. MarketData
-    md_error = None
+    # 3b. MarketData
     if _MD_AVAILABLE:
-        tr = _md_option_chain(ticker, expiration)
-        if tr is not None:
-            df_call, df_put = tr
-            if not df_call.empty or not df_put.empty:
-                _cache_set(_chain_cache, key, (df_call, df_put))
-                return df_call.copy(), df_put.copy()
-        md_error = _MD_LAST_ERROR
+        cd = _cooldown_remaining("marketdata")
+        if cd > 0:
+            errors.append(f"MarketData：冷卻中（{cd}s 後解除）")
+        else:
+            tr = _md_option_chain(ticker, expiration)
+            if tr is not None and (not tr[0].empty or not tr[1].empty):
+                return _save_and_return(tr[0], tr[1])
+            if _MD_LAST_ERROR:
+                _classify_error_and_cooldown("marketdata", _MD_LAST_ERROR)
+                errors.append(f"MarketData：{_MD_LAST_ERROR}")
 
-    # 3. yfinance fallback
-    try:
-        tk = _ticker(ticker)
-        chain = tk.option_chain(expiration)
-        df_call = chain.calls.copy()
-        df_put = chain.puts.copy()
-        _cache_set(_chain_cache, key, (df_call, df_put))
-        return df_call.copy(), df_put.copy()
-    except Exception as e:
-        # 三來源都失敗 → 把各個原因一起丟出來方便診斷
-        notes = []
-        if fh_error:
-            notes.append(f"Finnhub：{fh_error}")
-        if md_error:
-            notes.append(f"MarketData：{md_error}")
-        notes.append(f"yfinance：{type(e).__name__}: {e}")
-        raise RuntimeError("；".join(notes)) from e
+    # 3c. yfinance（冷卻中跳過；不在冷卻則最多重試 1 次）
+    yf_cd = _cooldown_remaining("yfinance")
+    if yf_cd > 0:
+        errors.append(f"yfinance：冷卻中（{yf_cd}s 後解除）")
+    else:
+        last_yf_err = None
+        for attempt in (1, 2):
+            try:
+                tk = _ticker(ticker)
+                chain = tk.option_chain(expiration)
+                return _save_and_return(chain.calls.copy(), chain.puts.copy())
+            except Exception as e:
+                last_yf_err = f"{type(e).__name__}: {e}"
+                _classify_error_and_cooldown("yfinance", last_yf_err)
+                # 被限流 → 直接放棄重試
+                if _cooldown_remaining("yfinance") > 0:
+                    break
+                # 一般錯誤 → 等 3s 重試
+                if attempt == 1:
+                    time.sleep(3)
+        if last_yf_err:
+            errors.append(f"yfinance：{last_yf_err}")
+
+    # 4. 全失敗 → 用過期磁碟快取
+    if disk is not None:
+        df_c, df_p, mtime = disk
+        age_h = (time.time() - mtime) / 3600
+        # 把過期警示放進 DataFrame 屬性，UI 可讀
+        df_c.attrs["stale_hours"] = round(age_h, 1)
+        df_p.attrs["stale_hours"] = round(age_h, 1)
+        _cache_set(_chain_cache, key, (df_c, df_p))
+        return df_c.copy(), df_p.copy()
+
+    # 5. 完全沒有資料
+    raise RuntimeError("；".join(errors) if errors else "未知錯誤")
 
 
 # ============================================================
