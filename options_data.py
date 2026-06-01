@@ -14,11 +14,59 @@ options_data.py — 美股期權鏈抓取 + Black-Scholes Greeks + 智能標籤
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# ============================================================
+# 反 rate-limit：用 curl_cffi 偽裝成真實 Chrome
+# Yahoo 對 requests / urllib 的標準 UA 很容易限流；curl_cffi 模擬 Chrome 的
+# TLS 指紋 + HTTP/2 行為，通常可繞過。
+# yfinance 0.2.40+ 支援透過 session= 參數注入。
+# ============================================================
+_YF_SESSION = None
+try:
+    from curl_cffi import requests as _cc_requests
+    _YF_SESSION = _cc_requests.Session(impersonate="chrome")
+except Exception:
+    _YF_SESSION = None
+
+
+def _ticker(symbol: str) -> "yf.Ticker":
+    """建立 yf.Ticker，盡可能用 curl_cffi session 避免限流"""
+    if _YF_SESSION is not None:
+        try:
+            return yf.Ticker(symbol, session=_YF_SESSION)
+        except TypeError:
+            # 舊版 yfinance 不接受 session 參數
+            pass
+    return yf.Ticker(symbol)
+
+
+# ============================================================
+# Process 內 TTL 快取（減少重複呼叫 yfinance）
+# ============================================================
+_TTL_SEC = 600  # 10 分鐘
+_exp_cache: dict[str, tuple[float, list[str]]] = {}
+_chain_cache: dict[tuple[str, str], tuple[float, tuple]] = {}
+
+
+def _cache_get(d: dict, key):
+    v = d.get(key)
+    if v is None:
+        return None
+    ts, payload = v
+    if time.time() - ts > _TTL_SEC:
+        d.pop(key, None)
+        return None
+    return payload
+
+
+def _cache_set(d: dict, key, payload) -> None:
+    d[key] = (time.time(), payload)
 
 
 # ============================================================
@@ -572,7 +620,7 @@ def get_next_earnings(ticker: str, cache_hours: int = 6) -> str | None:
 
     next_earn = None
     try:
-        tk = yf.Ticker(ticker)
+        tk = _ticker(ticker)
 
         # 嘗試 1：calendar dict
         try:
@@ -689,15 +737,22 @@ _last_expirations_error: dict[str, str] = {}  # ticker → 最近一次失敗原
 
 
 def list_expirations(ticker: str) -> list[str]:
-    """回傳該標的可選到期日清單（按時間排序）。失敗原因留在 _last_expirations_error[ticker]。"""
+    """回傳該標的可選到期日清單（按時間排序）。失敗原因留在 _last_expirations_error[ticker]。
+    10 分鐘 TTL 快取，避免重複打 yfinance 被 rate limit。"""
+    cached = _cache_get(_exp_cache, ticker)
+    if cached is not None:
+        _last_expirations_error.pop(ticker, None)
+        return cached
     try:
-        tk = yf.Ticker(ticker)
+        tk = _ticker(ticker)
         exps = tk.options  # 屬性存取會打 API
         if not exps:
             _last_expirations_error[ticker] = "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）"
             return []
+        result = list(exps)
+        _cache_set(_exp_cache, ticker, result)
         _last_expirations_error.pop(ticker, None)
-        return list(exps)
+        return result
     except Exception as e:
         _last_expirations_error[ticker] = f"{type(e).__name__}: {e}"
         return []
@@ -711,7 +766,7 @@ def last_expirations_error(ticker: str) -> str | None:
 def get_spot_price(ticker: str) -> float | None:
     """抓即時/最新收盤價"""
     try:
-        tk = yf.Ticker(ticker)
+        tk = _ticker(ticker)
         hist = tk.history(period="5d")
         if hist.empty:
             return None
@@ -722,17 +777,23 @@ def get_spot_price(ticker: str) -> float | None:
 
 def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    抓取指定到期日的 Call + Put 鏈
+    抓取指定到期日的 Call + Put 鏈（10 分鐘 TTL 快取避免 rate limit）
 
     Returns:
         (df_call, df_put)：兩個 DataFrame，欄位包含
         strike, lastPrice, bid, ask, impliedVolatility, openInterest, volume
     """
-    tk = yf.Ticker(ticker)
+    key = (ticker, expiration)
+    cached = _cache_get(_chain_cache, key)
+    if cached is not None:
+        df_c, df_p = cached
+        return df_c.copy(), df_p.copy()
+    tk = _ticker(ticker)
     chain = tk.option_chain(expiration)
     df_call = chain.calls.copy()
     df_put = chain.puts.copy()
-    return df_call, df_put
+    _cache_set(_chain_cache, key, (df_call, df_put))
+    return df_call.copy(), df_put.copy()
 
 
 # ============================================================
