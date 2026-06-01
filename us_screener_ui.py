@@ -1221,6 +1221,7 @@ with _tab_opt:
                 ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
             # 顯示資料源狀態，方便排查 rate limit 問題
             try:
+                ocol2.caption(f"🔧 Finnhub：{opt.finnhub_status()}")
                 ocol2.caption(f"🔧 MarketData：{opt.marketdata_status()}")
                 ocol2.caption(f"🔧 yfinance session：{opt.yf_session_status()}")
             except Exception:

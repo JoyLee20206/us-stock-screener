@@ -24,7 +24,128 @@ import requests
 import yfinance as yf
 
 # ============================================================
-# MarketData.app API（主要資料源，避開 Yahoo 對共用 IP 的限流）
+# Finnhub API（首選資料源，60 calls/min 免費版）
+#   1. 註冊 https://finnhub.io/register → 收信驗證
+#   2. Dashboard 首頁就有 API Key
+#   3. 設 env var FINNHUB_TOKEN
+#   ⚠️ /stock/option-chain 可能屬於 Premium。若回 403 會自動 fallback。
+# ============================================================
+FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN", "").strip()
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+_FH_AVAILABLE = bool(FINNHUB_TOKEN)
+_FH_LAST_ERROR: str | None = None
+
+
+def _fh_get(path: str, params: dict | None = None) -> dict | None:
+    """Finnhub 共用 GET；token 走 query param（Finnhub 慣例）"""
+    global _FH_LAST_ERROR
+    if not _FH_AVAILABLE:
+        return None
+    try:
+        params = dict(params or {})
+        params["token"] = FINNHUB_TOKEN
+        resp = requests.get(f"{FINNHUB_BASE}{path}", params=params, timeout=15)
+        if resp.status_code != 200:
+            _FH_LAST_ERROR = f"HTTP {resp.status_code}: {resp.text[:160]}"
+            return None
+        _FH_LAST_ERROR = None
+        return resp.json()
+    except Exception as e:
+        _FH_LAST_ERROR = f"{type(e).__name__}: {e}"
+        return None
+
+
+def finnhub_status() -> str:
+    if not FINNHUB_TOKEN:
+        return "未設定 FINNHUB_TOKEN"
+    if _FH_LAST_ERROR:
+        return f"已啟用但最近一次呼叫失敗：{_FH_LAST_ERROR}"
+    return "已啟用"
+
+
+# Finnhub 的 option-chain 一次回所有到期日，整批快取
+_fh_chain_full_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _fh_full_chain(ticker: str) -> dict | None:
+    """GET /stock/option-chain?symbol=XXX → 一次取所有到期日的 chain
+
+    回傳結構：
+      {expiration: "YYYY-MM-DD" → {"CALL": [...], "PUT": [...]}}
+    失敗回 None。
+    """
+    cached = _cache_get(_fh_chain_full_cache, ticker)
+    if cached is not None:
+        return cached
+    j = _fh_get("/stock/option-chain", {"symbol": ticker})
+    if j is None:
+        return None
+    data = j.get("data") or []
+    if not data:
+        return {}
+    parsed: dict[str, dict] = {}
+    for entry in data:
+        exp = entry.get("expirationDate")
+        if not exp:
+            continue
+        opts = entry.get("options") or {}
+        parsed[exp] = {
+            "CALL": opts.get("CALL") or [],
+            "PUT": opts.get("PUT") or [],
+        }
+    _cache_set(_fh_chain_full_cache, ticker, parsed)
+    return parsed
+
+
+def _fh_list_expirations(ticker: str) -> list[str] | None:
+    parsed = _fh_full_chain(ticker)
+    if parsed is None:
+        return None
+    return sorted(parsed.keys())
+
+
+def _fh_option_chain(ticker: str, expiration: str
+                     ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    parsed = _fh_full_chain(ticker)
+    if parsed is None:
+        return None
+    entry = parsed.get(expiration)
+    if entry is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    def _rows_to_df(rows: list[dict]) -> pd.DataFrame:
+        if not rows:
+            return pd.DataFrame()
+        out = []
+        for o in rows:
+            out.append({
+                "strike": float(o.get("strike") or 0),
+                "lastPrice": float(o.get("lastPrice") or 0),
+                "bid": float(o.get("bid") or 0),
+                "ask": float(o.get("ask") or 0),
+                "volume": int(o.get("volume") or 0),
+                "openInterest": int(o.get("openInterest") or 0),
+                "impliedVolatility": float(o.get("impliedVolatility") or 0),
+                "contractSymbol": o.get("contractName", ""),
+            })
+        return pd.DataFrame(out)
+
+    return _rows_to_df(entry["CALL"]), _rows_to_df(entry["PUT"])
+
+
+def _fh_spot(ticker: str) -> float | None:
+    j = _fh_get("/quote", {"symbol": ticker})
+    if j is None:
+        return None
+    try:
+        c = j.get("c")
+        return float(c) if c else None
+    except Exception:
+        return None
+
+
+# ============================================================
+# MarketData.app API（次要資料源，避開 Yahoo 對共用 IP 的限流）
 #   1. 註冊 https://www.marketdata.app/
 #   2. Dashboard 點 Generate Token → 信箱收 token
 #   3. 設 env var MARKETDATA_TOKEN（Streamlit Cloud → Settings → Secrets）
@@ -953,23 +1074,35 @@ def list_expirations(ticker: str) -> list[str]:
         _last_expirations_error.pop(ticker, None)
         return cached
 
-    # 1. MarketData.app 優先
+    # 1. Finnhub 優先（順帶把整個 chain cache 起來，後面 fetch_option_chain 不用再打）
+    if _FH_AVAILABLE:
+        exps = _fh_list_expirations(ticker)
+        if exps:
+            _cache_set(_exp_cache, ticker, exps)
+            _last_expirations_error.pop(ticker, None)
+            return exps
+
+    # 2. MarketData
     if _MD_AVAILABLE:
         exps = _md_list_expirations(ticker)
         if exps:
             _cache_set(_exp_cache, ticker, exps)
             _last_expirations_error.pop(ticker, None)
             return exps
-        # MarketData 失敗 → 繼續 fallback 到 yfinance
 
-    # 2. yfinance fallback
+    # 3. yfinance fallback
     try:
         tk = _ticker(ticker)
         exps = tk.options
         if not exps:
-            md_note = f"；MarketData 也失敗：{_MD_LAST_ERROR}" if (_MD_AVAILABLE and _MD_LAST_ERROR) else ""
+            notes = []
+            if _FH_AVAILABLE and _FH_LAST_ERROR:
+                notes.append(f"Finnhub 也失敗：{_FH_LAST_ERROR}")
+            if _MD_AVAILABLE and _MD_LAST_ERROR:
+                notes.append(f"MarketData 也失敗：{_MD_LAST_ERROR}")
+            tail = ("；" + "；".join(notes)) if notes else ""
             _last_expirations_error[ticker] = (
-                "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）" + md_note
+                "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）" + tail
             )
             return []
         result = list(exps)
@@ -977,8 +1110,13 @@ def list_expirations(ticker: str) -> list[str]:
         _last_expirations_error.pop(ticker, None)
         return result
     except Exception as e:
-        md_note = f"；MarketData 也失敗：{_MD_LAST_ERROR}" if (_MD_AVAILABLE and _MD_LAST_ERROR) else ""
-        _last_expirations_error[ticker] = f"{type(e).__name__}: {e}{md_note}"
+        notes = []
+        if _FH_AVAILABLE and _FH_LAST_ERROR:
+            notes.append(f"Finnhub：{_FH_LAST_ERROR}")
+        if _MD_AVAILABLE and _MD_LAST_ERROR:
+            notes.append(f"MarketData：{_MD_LAST_ERROR}")
+        tail = ("；" + "；".join(notes)) if notes else ""
+        _last_expirations_error[ticker] = f"{type(e).__name__}: {e}{tail}"
         return []
 
 
@@ -988,13 +1126,18 @@ def last_expirations_error(ticker: str) -> str | None:
 
 
 def get_spot_price(ticker: str) -> float | None:
-    """抓即時/最新收盤價。MarketData 優先、yfinance fallback。"""
-    # 1. MarketData.app
+    """抓即時/最新收盤價。Finnhub → MarketData → yfinance fallback。"""
+    # 1. Finnhub
+    if _FH_AVAILABLE:
+        price = _fh_spot(ticker)
+        if price and price > 0:
+            return price
+    # 2. MarketData.app
     if _MD_AVAILABLE:
         price = _md_spot(ticker)
         if price and price > 0:
             return price
-    # 2. yfinance fallback
+    # 3. yfinance fallback
     try:
         tk = _ticker(ticker)
         hist = tk.history(period="5d")
@@ -1019,7 +1162,18 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
         df_c, df_p = cached
         return df_c.copy(), df_p.copy()
 
-    # 1. MarketData.app 優先
+    # 1. Finnhub 優先
+    fh_error = None
+    if _FH_AVAILABLE:
+        tr = _fh_option_chain(ticker, expiration)
+        if tr is not None:
+            df_call, df_put = tr
+            if not df_call.empty or not df_put.empty:
+                _cache_set(_chain_cache, key, (df_call, df_put))
+                return df_call.copy(), df_put.copy()
+        fh_error = _FH_LAST_ERROR
+
+    # 2. MarketData
     md_error = None
     if _MD_AVAILABLE:
         tr = _md_option_chain(ticker, expiration)
@@ -1028,9 +1182,9 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
             if not df_call.empty or not df_put.empty:
                 _cache_set(_chain_cache, key, (df_call, df_put))
                 return df_call.copy(), df_put.copy()
-        md_error = _MD_LAST_ERROR  # 留著 fallback 失敗時一起回報
+        md_error = _MD_LAST_ERROR
 
-    # 2. yfinance fallback
+    # 3. yfinance fallback
     try:
         tk = _ticker(ticker)
         chain = tk.option_chain(expiration)
@@ -1039,10 +1193,14 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
         _cache_set(_chain_cache, key, (df_call, df_put))
         return df_call.copy(), df_put.copy()
     except Exception as e:
-        # 雙來源都失敗 → 把兩個原因一起丟出來方便診斷
+        # 三來源都失敗 → 把各個原因一起丟出來方便診斷
+        notes = []
+        if fh_error:
+            notes.append(f"Finnhub：{fh_error}")
         if md_error:
-            raise RuntimeError(f"MarketData：{md_error}；yfinance：{type(e).__name__}: {e}") from e
-        raise
+            notes.append(f"MarketData：{md_error}")
+        notes.append(f"yfinance：{type(e).__name__}: {e}")
+        raise RuntimeError("；".join(notes)) from e
 
 
 # ============================================================
