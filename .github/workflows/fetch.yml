@@ -26,6 +26,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run fetch_cache_us.py
+        env:
+          # ★ 關鍵新增：讓腳本先從 Releases 拉最新 parquet 再做增量
+          # 否則 Actions 永遠拿 repo 內舊版（2026-05-14 那份）→ 每次都 18 天未更新 → 強制全量
+          PARQUET_URL: https://github.com/${{ github.repository }}/releases/download/data-cache/us_daily.parquet
         run: python fetch_cache_us.py
 
       - name: Upload parquet to GitHub Releases (tag = data-cache)
