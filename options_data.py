@@ -141,7 +141,13 @@ def snapshot_available_expirations(ticker: str) -> list[str]:
 
 
 def clear_options_cache() -> int:
-    """清空所有磁碟+記憶體快取，回傳清掉的檔案數"""
+    """
+    清空 24h 磁碟快取 + 記憶體快取 + 解除所有 source 冷卻。
+    回傳清掉的磁碟檔案數。
+
+    註：**不會清「每日全鏈快照」**（cache/option_snapshots/）
+    那是 GitHub Actions 每日餵的備援資料，清掉也只能等明天，所以特意保留。
+    """
     n = 0
     if DISK_CACHE_DIR.exists():
         for p in DISK_CACHE_DIR.glob("*.parquet"):

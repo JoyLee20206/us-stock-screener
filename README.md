@@ -523,7 +523,8 @@ streamlit run us_screener_ui.py
 | 成分股同步 | 每次都從 Wikipedia 抓 | 退出指數的自動移除 |
 | IV 累積 | 工作日凌晨 5:45 | 45 檔各 +1 筆 |
 | Releases 同步(2026-06-01) | 每次 workflow 跑前 | 從 Releases 拉最新 parquet |
-| 期權磁碟快取(2026-06-01) | 雲端查詢成功時 | 同代號 6 小時內不重抓 |
+| 期權磁碟快取 | 雲端查詢成功時 | 同代號 24 小時內不重抓 |
+| 每日全鏈快照 | GitHub Actions 每日盤中(UTC 19:00) | 45 檔 WATCHLIST × ATM ±20% strikes,雲端 fallback 用 |
 | IV 反推(2026-06-01) | 任何資料源回傳 IV 缺失或不合理時 | Newton 法從中價回推 IV,讓盤後也能算 Greeks |
 | 盤後提示橫條(2026-06-01) | 美股休市時段 | 自動偵測 ET 09:30-16:00 外的時段,UI 顯示提示 |
 
