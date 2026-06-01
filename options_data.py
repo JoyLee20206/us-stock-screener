@@ -685,13 +685,27 @@ def crosses_earnings(expiration: str, next_earn_iso: str | None) -> bool:
         return False
 
 
+_last_expirations_error: dict[str, str] = {}  # ticker → 最近一次失敗原因
+
+
 def list_expirations(ticker: str) -> list[str]:
-    """回傳該標的可選到期日清單（按時間排序）"""
+    """回傳該標的可選到期日清單（按時間排序）。失敗原因留在 _last_expirations_error[ticker]。"""
     try:
         tk = yf.Ticker(ticker)
-        return list(tk.options) if tk.options else []
-    except Exception:
+        exps = tk.options  # 屬性存取會打 API
+        if not exps:
+            _last_expirations_error[ticker] = "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）"
+            return []
+        _last_expirations_error.pop(ticker, None)
+        return list(exps)
+    except Exception as e:
+        _last_expirations_error[ticker] = f"{type(e).__name__}: {e}"
         return []
+
+
+def last_expirations_error(ticker: str) -> str | None:
+    """取得最近一次 list_expirations(ticker) 的失敗原因（沒失敗時回 None）"""
+    return _last_expirations_error.get(ticker)
 
 
 def get_spot_price(ticker: str) -> float | None:

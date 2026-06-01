@@ -1214,7 +1214,11 @@ with _tab_opt:
                 expirations = opt.list_expirations(opt_ticker)
 
         if not expirations:
-            ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
+            _err = opt.last_expirations_error(opt_ticker) if opt_ticker else None
+            if _err:
+                ocol2.warning(f"⚠️ 無法取得到期日：{_err}")
+            else:
+                ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
             opt_expiration = None
         else:
             # 預設選第 2 個（避開週選常見的高 Theta 風險）
