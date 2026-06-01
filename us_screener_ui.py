@@ -1574,6 +1574,16 @@ with _tab_opt:
                     "→ ⚠️太OTM / 🔥高IV / 💀Theta黑洞 / ❓流動性差"
                 )
 
+                # ─── Bid/Ask 報價健康度檢測（盤後常見 $0 提示）───
+                _qh_call = opt.chain_quote_health(view["calls"])
+                _qh_put = opt.chain_quote_health(view["puts"])
+                if _qh_call["is_after_hours_data"] or _qh_put["is_after_hours_data"]:
+                    st.info(
+                        f"💡 **Bid/Ask 多為 $0**（Call 占 {_qh_call['zero_pct']}%、Put 占 {_qh_put['zero_pct']}%）"
+                        f"— 表示資料來自**美股盤後快照**。盤後沒人掛單，所以即時報價空白。\n\n"
+                        f"📕 **請改看「Last」欄**（最後成交價）。Bid/Ask 會在台灣**晚上 21:30 美股開盤後**自動有值。"
+                    )
+
                 # 完整鏈
                 tab_call, tab_put = st.tabs(["📈 Call 鏈", "📉 Put 鏈"])
                 with tab_call:
@@ -1592,6 +1602,8 @@ with _tab_opt:
                             use_container_width=True, hide_index=True,
                             column_config={
                                 "中價": st.column_config.NumberColumn(format="$%.2f"),
+                                "Last": st.column_config.NumberColumn(format="$%.2f",
+                                    help="最後成交價。盤後 Bid/Ask=$0 時請看這欄。"),
                                 "Bid": st.column_config.NumberColumn(format="$%.2f"),
                                 "Ask": st.column_config.NumberColumn(format="$%.2f"),
                                 "行權價": st.column_config.NumberColumn(format="$%.2f"),
@@ -1616,6 +1628,8 @@ with _tab_opt:
                             use_container_width=True, hide_index=True,
                             column_config={
                                 "中價": st.column_config.NumberColumn(format="$%.2f"),
+                                "Last": st.column_config.NumberColumn(format="$%.2f",
+                                    help="最後成交價。盤後 Bid/Ask=$0 時請看這欄。"),
                                 "Bid": st.column_config.NumberColumn(format="$%.2f"),
                                 "Ask": st.column_config.NumberColumn(format="$%.2f"),
                                 "行權價": st.column_config.NumberColumn(format="$%.2f"),

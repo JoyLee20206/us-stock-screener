@@ -1866,7 +1866,7 @@ def iv_history_status(history_path: str | Path = "cache/iv_history.parquet") -> 
         return {"exists": False, "days": 0, "tickers": 0, "first_date": None, "last_date": None}
 
 
-DISPLAY_COLS = ["label", "earnings_flag", "strike", "mid", "bid", "ask",
+DISPLAY_COLS = ["label", "earnings_flag", "strike", "mid", "lastPrice", "bid", "ask",
                 "delta", "theta_per_day", "iv_pct",
                 "break_even", "distance_pct",
                 "openInterest", "volume", "dte"]
@@ -1876,6 +1876,7 @@ DISPLAY_COL_NAMES = {
     "earnings_flag": "📅",
     "strike": "行權價",
     "mid": "中價",
+    "lastPrice": "Last",   # 最後成交價（盤後 Bid/Ask=$0 時參考這個）
     "bid": "Bid",
     "ask": "Ask",
     "delta": "Δ",
@@ -1897,6 +1898,24 @@ def to_display_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df[cols].copy()
     out = out.rename(columns=DISPLAY_COL_NAMES)
     return out
+
+
+def chain_quote_health(df: pd.DataFrame) -> dict:
+    """
+    判斷期權鏈 Bid/Ask 報價健康度，給 UI 顯示用。
+    回傳 {'zero_pct': 0~100, 'is_after_hours_data': bool}
+    """
+    if df is None or df.empty or "bid" not in df.columns or "ask" not in df.columns:
+        return {"zero_pct": 0.0, "is_after_hours_data": False}
+    total = len(df)
+    if total == 0:
+        return {"zero_pct": 0.0, "is_after_hours_data": False}
+    both_zero = int(((df["bid"].fillna(0) == 0) & (df["ask"].fillna(0) == 0)).sum())
+    zero_pct = round(both_zero / total * 100, 1)
+    return {
+        "zero_pct": zero_pct,
+        "is_after_hours_data": zero_pct >= 50.0,   # 過半 Bid/Ask=0 → 視為盤後
+    }
 
 
 if __name__ == "__main__":
