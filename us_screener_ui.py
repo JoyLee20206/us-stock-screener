@@ -1219,6 +1219,11 @@ with _tab_opt:
                 ocol2.warning(f"⚠️ 無法取得到期日：{_err}")
             else:
                 ocol2.warning("⚠️ 無法取得到期日（可能代號錯誤或暫無期權）")
+            # 顯示 yfinance session 狀態，方便排查 rate limit 問題
+            try:
+                ocol2.caption(f"🔧 yfinance session：{opt.yf_session_status()}")
+            except Exception:
+                pass
             opt_expiration = None
         else:
             # 預設選第 2 個（避開週選常見的高 Theta 風險）

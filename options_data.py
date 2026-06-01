@@ -28,11 +28,19 @@ import yfinance as yf
 # yfinance 0.2.40+ 支援透過 session= 參數注入。
 # ============================================================
 _YF_SESSION = None
+_CURL_CFFI_STATUS = "未載入"
 try:
     from curl_cffi import requests as _cc_requests
     _YF_SESSION = _cc_requests.Session(impersonate="chrome")
-except Exception:
+    _CURL_CFFI_STATUS = "已啟用（impersonate=chrome）"
+except Exception as _e:
     _YF_SESSION = None
+    _CURL_CFFI_STATUS = f"載入失敗：{type(_e).__name__}: {_e}"
+
+
+def yf_session_status() -> str:
+    """供 UI 顯示 curl_cffi 載入狀態"""
+    return _CURL_CFFI_STATUS
 
 
 def _ticker(symbol: str) -> "yf.Ticker":
