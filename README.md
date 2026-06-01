@@ -264,7 +264,8 @@ X 軸是到期日股價、Y 軸是損益。曲線會自動標出:
 
 | 機制 | 做什麼 | 比喻 |
 |------|--------|------|
-| **6 小時磁碟快取** | 抓到一次成功就存起來,6 小時內不再打 API | 抓到一次魚冰起來吃半天 |
+| **24 小時磁碟快取** | 抓到一次成功就存起來,24 小時內不再打 API | 抓到一次魚冰起來吃一天 |
+| **📸 每日全鏈快照(45 檔)** | GitHub Actions 每天 06:00 抓 WATCHLIST 全鏈 ATM ±20%,App 自動下載 | 冰箱裡永遠有現貨 |
 | **智能冷卻** | 403/402 鎖 1 小時、429 限流鎖 5 分鐘 | 已知會打不通的不要狂打 |
 | **yfinance 自動重試 1 次** | 失敗等 3 秒再試一下 | 偶發網路抖動可吸收 |
 | **過期 fallback** | 全部失敗時用磁碟上的舊資料 + 黃色橫條告訴你 | 沒新鮮的就吃罐頭 |
@@ -335,7 +336,7 @@ streamlit run us_screener_ui.py
 | `us_screener_ui.py` | ~1850 | 整個 App 的介面 + 選股邏輯 + 持倉 + 回測 + 期權教學/瀏覽/分析 |
 | `options_data.py` | ~1400 | 所有跟期權有關的計算(Greeks、標籤、IV Rank、財報、磁碟快取、API 客戶端) |
 | `fetch_cache_us.py` | ~310 | 從 Wikipedia 抓成分股名單,從 yfinance 抓股價,從 Releases 同步舊版 |
-| `fetch_iv_history.py` | ~130 | 每天抓 51 檔的 IV 快照,累積成 IV 歷史 |
+| `fetch_iv_history.py` | ~130 | 每天抓 45 檔的 IV 快照,累積成 IV 歷史 |
 | `期權新手指南.md` | ~280 | 新手讀的完整教學 |
 
 ---
@@ -353,7 +354,7 @@ streamlit run us_screener_ui.py
 │       ▼                                                   │
 │  GitHub Releases(免費檔案託管)                          │
 │  ├─ us_daily.parquet      ~1,000 檔股價 / 1 年            │
-│  └─ iv_history.parquet    51 檔 IV 累積                   │
+│  └─ iv_history.parquet    45 檔 IV 累積                   │
 └─────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -494,7 +495,7 @@ streamlit run us_screener_ui.py
 
 ### IV 觀察清單
 
-51 檔涵蓋大盤 ETF / 板塊 / Magnificent 7 / 半導體 / 雲端 SaaS / 中概 / 熱門題材。要加自己常看的代號,編輯 `fetch_iv_history.py` 的 `WATCHLIST`。
+45 檔涵蓋大盤 ETF / 板塊 / Magnificent 7 / 半導體 / 雲端 SaaS / 中概 / 熱門題材。要加自己常看的代號,編輯 `fetch_iv_history.py` 的 `WATCHLIST`。
 
 ---
 
@@ -506,7 +507,7 @@ streamlit run us_screener_ui.py
 | 每週全量 | 週六 | 完整重抓 1 年(吸收當週分割/股息) |
 | 失效保護 | 超過 7 天沒更新 | 自動強制全量 |
 | 成分股同步 | 每次都從 Wikipedia 抓 | 退出指數的自動移除 |
-| IV 累積 | 工作日凌晨 5:45 | 51 檔各 +1 筆 |
+| IV 累積 | 工作日凌晨 5:45 | 45 檔各 +1 筆 |
 | Releases 同步(2026-06-01) | 每次 workflow 跑前 | 從 Releases 拉最新 parquet |
 | 期權磁碟快取(2026-06-01) | 雲端查詢成功時 | 同代號 6 小時內不重抓 |
 | IV 反推(2026-06-01) | 任何資料源回傳 IV 缺失或不合理時 | Newton 法從中價回推 IV,讓盤後也能算 Greeks |

@@ -102,6 +102,39 @@ def _download_parquet_from_url(url: str):
         mtime = now_tpe()
     return df, mtime
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _sync_option_snapshots_from_release(release_base: str) -> int:
+    """
+    從 GitHub Releases 下載 option_snapshots.tar.gz 並解壓。
+    一天只跑一次（ttl=86400），雲端啟動 App 時自動觸發。
+
+    Returns: 解壓出來的 ticker parquet 檔案數
+    """
+    import tarfile
+    snapshot_dir = Path("cache/option_snapshots")
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    # 推導 tarball URL：把 us_daily.parquet 換成 option_snapshots.tar.gz
+    tar_url = release_base.replace("us_daily.parquet", "option_snapshots.tar.gz")
+    try:
+        resp = requests.get(tar_url, timeout=60)
+        resp.raise_for_status()
+        tmp_tar = Path("/tmp" if Path("/tmp").exists() else ".") / "_snap.tar.gz"
+        tmp_tar.write_bytes(resp.content)
+        with tarfile.open(tmp_tar, "r:gz") as tar:
+            # 安全解壓到 cache/
+            for m in tar.getmembers():
+                if m.name.startswith("option_snapshots/") and m.name.endswith(".parquet"):
+                    tar.extract(m, "cache")
+        try:
+            tmp_tar.unlink()
+        except Exception:
+            pass
+        return len(list(snapshot_dir.glob("*.parquet")))
+    except Exception:
+        return 0
+
+
 def load_stock_data():
     """
     優先序：
@@ -109,6 +142,7 @@ def load_stock_data():
          避免 repo 內舊的 cache/us_daily.parquet 蓋掉新版資料
       2. 否則嘗試本地檔案（本機開發用）
       3. 都沒有則報錯
+    順便：同步下載 option_snapshots.tar.gz（背景每日全鏈快照）
     """
     try:
         parquet_url = st.secrets.get("PARQUET_URL", "")
@@ -119,6 +153,11 @@ def load_stock_data():
     if parquet_url:
         try:
             df, mtime_tpe = _download_parquet_from_url(parquet_url)
+            # 同步下載期權快照（一天最多一次）— 失敗不影響主資料
+            try:
+                _sync_option_snapshots_from_release(parquet_url)
+            except Exception:
+                pass
             return df, mtime_tpe
         except Exception as e:
             st.warning(f"⚠️ 雲端資料下載失敗：{e}，嘗試本地快取...")
@@ -1248,6 +1287,16 @@ with _tab_opt:
                 default_idx = deltas.index(min(deltas))
             except Exception:
                 pass
+
+            # ─── 上一輪「📆 改選 YYYY-MM-DD」按鈕觸發的切換 ───
+            # Streamlit 不允許在 widget 渲染後同 run 直接設它的 session_state，
+            # 所以按鈕只寫入 sentinel，這裡在 widget 渲染前消化。
+            if "_pending_exp_switch" in st.session_state:
+                _pending = st.session_state.pop("_pending_exp_switch")
+                if _pending in expirations:
+                    st.session_state["opt_expiration"] = _pending
+                    default_idx = expirations.index(_pending)
+
             opt_expiration = ocol2.selectbox(
                 "到期日（預設選最接近 30 天）",
                 options=expirations,
@@ -1292,14 +1341,25 @@ with _tab_opt:
         if view is not None:
             # 過期資料警示：fetch_option_chain 在「所有來源都失敗時」會回過期磁碟快取
             try:
-                _stale_h = view.get("calls").attrs.get("stale_hours") if view.get("calls") is not None else None
-                _iv_repaired = (view.get("calls") is not None and view["calls"].attrs.get("iv_was_repaired")) or \
-                               (view.get("puts") is not None and view["puts"].attrs.get("iv_was_repaired"))
+                _calls_attrs = view["calls"].attrs if view.get("calls") is not None else {}
+                _puts_attrs = view["puts"].attrs if view.get("puts") is not None else {}
+                _stale_h = _calls_attrs.get("stale_hours") or _puts_attrs.get("stale_hours")
+                _iv_repaired = _calls_attrs.get("iv_was_repaired") or _puts_attrs.get("iv_was_repaired")
+                _from_snapshot = _calls_attrs.get("from_snapshot") or _puts_attrs.get("from_snapshot")
+                _snap_age = _calls_attrs.get("snapshot_age_hours") or _puts_attrs.get("snapshot_age_hours")
             except Exception:
                 _stale_h = None
                 _iv_repaired = False
-            if _iv_repaired and not _stale_h:
+                _from_snapshot = False
+                _snap_age = None
+            if _iv_repaired and not _stale_h and not _from_snapshot:
                 st.caption("🔧 偵測到部分合約 IV 缺失或異常，已用 Black-Scholes Newton 法從中價反推（誤差 5-15%，僅供參考）。")
+            if _from_snapshot:
+                st.info(
+                    f"📸 **使用每日全鏈快照資料**（{_snap_age} 小時前更新）。"
+                    f"即時 yfinance 抓取失敗，已自動切到 GitHub Actions 每天備份的 ATM ±20% 範圍快照。"
+                    f"此資料對 WATCHLIST 標的（SPY/QQQ/NVDA/AAPL/MSFT 等 45 檔）特別有效。"
+                )
             if _stale_h:
                 st.warning(
                     f"📁 **目前顯示的是 {_stale_h} 小時前的快取資料**。"
@@ -1347,8 +1407,10 @@ with _tab_opt:
                             if st.button(f"📆 改選 {_post_exp}", key="switch_post_earn",
                                          use_container_width=True,
                                          help=f"自動切換到財報後到期日 {_post_exp}（財報後 ~14 天）"):
-                                # 直接修改 expiration 選項並重新查詢
-                                st.session_state["opt_expiration"] = _post_exp
+                                # 把切換意圖存到 sentinel，下一輪 rerun 在 widget 渲染前生效
+                                # （Streamlit 不允許 widget 渲染後直接寫它的 session_state key）
+                                st.session_state["_pending_exp_switch"] = _post_exp
+                                # 先抓好新 view 存起來，下一輪直接顯示
                                 with st.spinner("重新抓取財報後到期合約..."):
                                     _new_view = opt.build_buyer_view(opt_ticker, _post_exp,
                                                                        df_daily=df_daily)

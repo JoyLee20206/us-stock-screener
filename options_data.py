@@ -29,7 +29,8 @@ import yfinance as yf
 # 磁碟快取 + 智能冷卻（雲端 yfinance 限流的補強）
 # ============================================================
 DISK_CACHE_DIR = Path("cache/options")
-DISK_FRESH_HOURS = 6          # 6 小時內視為新鮮，直接用不打 API
+DISK_SNAPSHOT_DIR = Path("cache/option_snapshots")  # 背景每日全鏈快照（ATM ±20%）
+DISK_FRESH_HOURS = 24         # 24 小時內視為新鮮，直接用不打 API（盤後也夠用）
 COOLDOWN_429_SEC = 300        # 被限流後冷卻 5 分鐘
 COOLDOWN_PREMIUM_SEC = 3600   # 403/402 視為永久鎖（session 內 1 小時不再試）
 
@@ -90,6 +91,53 @@ def _disk_write(ticker: str, expiration: str,
         combined.to_parquet(_disk_paths(ticker, expiration))
     except Exception:
         pass
+
+
+def _snapshot_path(ticker: str) -> Path:
+    """每日全鏈快照檔（per ticker，所有到期 + ATM ±20% strikes）"""
+    DISK_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    return DISK_SNAPSHOT_DIR / f"{ticker}.parquet"
+
+
+def _snapshot_read(ticker: str, expiration: str
+                   ) -> tuple[pd.DataFrame, pd.DataFrame, float] | None:
+    """
+    讀「背景每日全鏈快照」中對應到期日的合約。
+
+    Returns: (df_call, df_put, mtime) 或 None
+    """
+    p = _snapshot_path(ticker)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        # 過濾出該到期日
+        sub = df[df["expiration"] == expiration]
+        if sub.empty:
+            return None
+        mtime = p.stat().st_mtime
+        cols = [c for c in sub.columns if c not in ("expiration", "_kind",
+                                                      "_spot_at_snapshot",
+                                                      "_snapshot_date")]
+        df_call = sub[sub["_kind"] == "call"][cols].reset_index(drop=True)
+        df_put = sub[sub["_kind"] == "put"][cols].reset_index(drop=True)
+        if df_call.empty and df_put.empty:
+            return None
+        return df_call, df_put, mtime
+    except Exception:
+        return None
+
+
+def snapshot_available_expirations(ticker: str) -> list[str]:
+    """回傳該標的背景快照內所有可用到期日（給 UI 顯示用）"""
+    p = _snapshot_path(ticker)
+    if not p.exists():
+        return []
+    try:
+        df = pd.read_parquet(p)
+        return sorted(df["expiration"].unique().tolist())
+    except Exception:
+        return []
 
 
 def clear_options_cache() -> int:
@@ -1250,11 +1298,12 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
 
     完整流程（雲端強化版）：
       1. 10 分鐘記憶體快取（同 Streamlit session 重複查詢用）
-      2. 6 小時磁碟快取（同程序重啟前的查詢結果）
+      2. 24 小時磁碟快取（同程序重啟前的查詢結果）
       3. 試 Finnhub → MarketData → yfinance（各 source 冷卻中跳過）
          yfinance 失敗 + 非限流 → 等 3s 再試一次
-      4. 全失敗 → 用磁碟舊資料（含過期），UI 顯示「資料 X 小時前」
-      5. 完全沒舊資料 → raise
+      4. 失敗 → 試「背景全鏈快照」(cache/option_snapshots/{ticker}.parquet，每日更新，ATM ±20%)
+      5. 仍失敗 → 用磁碟舊資料（含過期），UI 顯示「資料 X 小時前」
+      6. 完全沒舊資料 → raise
     """
     key = (ticker, expiration)
 
@@ -1328,7 +1377,21 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
         if last_yf_err:
             errors.append(f"yfinance：{last_yf_err}")
 
-    # 4. 全失敗 → 用過期磁碟快取
+    # 4. 試「背景每日全鏈快照」(cache/option_snapshots/{ticker}.parquet)
+    #    這是 GitHub Actions 每日抓 WATCHLIST 標的 ATM ±20% 範圍的鏈
+    snap = _snapshot_read(ticker, expiration)
+    if snap is not None:
+        df_c, df_p, mtime = snap
+        age_h = (time.time() - mtime) / 3600
+        # 標記資料來源
+        df_c.attrs["from_snapshot"] = True
+        df_c.attrs["snapshot_age_hours"] = round(age_h, 1)
+        df_p.attrs["from_snapshot"] = True
+        df_p.attrs["snapshot_age_hours"] = round(age_h, 1)
+        _cache_set(_chain_cache, key, (df_c, df_p))
+        return df_c.copy(), df_p.copy()
+
+    # 5. 全失敗 → 用過期磁碟快取
     if disk is not None:
         df_c, df_p, mtime = disk
         age_h = (time.time() - mtime) / 3600
@@ -1338,7 +1401,7 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
         _cache_set(_chain_cache, key, (df_c, df_p))
         return df_c.copy(), df_p.copy()
 
-    # 5. 完全沒有資料
+    # 6. 完全沒有資料
     raise RuntimeError("；".join(errors) if errors else "未知錯誤")
 
 
