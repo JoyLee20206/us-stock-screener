@@ -38,15 +38,21 @@ _MD_AVAILABLE = bool(MARKETDATA_TOKEN)
 _MD_LAST_ERROR: str | None = None
 
 
-def _md_get(path: str, params: dict | None = None) -> dict | None:
-    """共用 GET 包裝；失敗回 None，原因留在 _MD_LAST_ERROR"""
+def _md_get(path: str, params: dict | None = None,
+            use_feed: bool = False) -> dict | None:
+    """共用 GET 包裝；失敗回 None，原因留在 _MD_LAST_ERROR
+
+    use_feed: 是否帶 feed=cached 參數。
+      ✅ 適用：/options/chain/、/stocks/quotes/
+      ❌ 不適用：/options/expirations/（會回 HTTP 402 Payment Required）
+    """
     global _MD_LAST_ERROR
     if not _MD_AVAILABLE:
         return None
     try:
         params = dict(params or {})
-        # cached feed 是免費版必要參數；MarketData 的 chain/quote 都吃 feed
-        params.setdefault("feed", MARKETDATA_FEED)
+        if use_feed:
+            params.setdefault("feed", MARKETDATA_FEED)
         resp = requests.get(
             f"{MARKETDATA_BASE}{path}",
             headers={"Authorization": f"Bearer {MARKETDATA_TOKEN}",
@@ -79,8 +85,8 @@ def marketdata_status() -> str:
 
 
 def _md_list_expirations(ticker: str) -> list[str] | None:
-    """GET /v1/options/expirations/{ticker}/"""
-    j = _md_get(f"/options/expirations/{ticker}/")
+    """GET /v1/options/expirations/{ticker}/（不帶 feed 參數，會 402）"""
+    j = _md_get(f"/options/expirations/{ticker}/", use_feed=False)
     if j is None:
         return None
     if j.get("s") == "no_data":
@@ -98,7 +104,7 @@ def _md_option_chain(ticker: str, expiration: str
 
     MarketData 回傳是 column-oriented：每個欄位是 list。
     """
-    j = _md_get(f"/options/chain/{ticker}/", {"expiration": expiration})
+    j = _md_get(f"/options/chain/{ticker}/", {"expiration": expiration}, use_feed=True)
     if j is None:
         return None
     if j.get("s") == "no_data":
@@ -168,7 +174,7 @@ def _md_option_chain(ticker: str, expiration: str
 
 def _md_spot(ticker: str) -> float | None:
     """GET /v1/stocks/quotes/{ticker}/"""
-    j = _md_get(f"/stocks/quotes/{ticker}/")
+    j = _md_get(f"/stocks/quotes/{ticker}/", use_feed=True)
     if j is None or j.get("s") == "no_data":
         return None
     last = j.get("last")
