@@ -7,3 +7,4 @@ requests>=2.31
 lxml>=4.9
 beautifulsoup4>=4.12
 plotly
+curl_cffi
