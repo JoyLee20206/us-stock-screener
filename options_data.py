@@ -182,14 +182,19 @@ def risk_checklist(option_type: str, strike: float, mid: float,
         items.append({"key": "iv", "label": "隱含波動率", "status": "❌",
                       "detail": f"IV {iv_pct:.1f}%（過高，IV crush 風險大）"})
 
-    # 4. 流動性 - OI
+    # 4. 流動性 - OI（yfinance 的 OI 常 lag/回 0，量大時放寬一格）
     oi = open_interest or 0
+    _vol_for_oi = volume or 0
     if oi >= 500:
         items.append({"key": "oi", "label": "未平倉量 OI", "status": "✅",
                       "detail": f"{oi:,}（流動性充足）"})
     elif oi >= 100:
         items.append({"key": "oi", "label": "未平倉量 OI", "status": "⚠️",
                       "detail": f"{oi:,}（可接受）"})
+    elif _vol_for_oi >= 50:
+        # OI 顯示偏低但今日量很大 → 多半是 yfinance 資料 lag，不該判紅燈
+        items.append({"key": "oi", "label": "未平倉量 OI", "status": "⚠️",
+                      "detail": f"{oi:,}（資料偏低，但今日量 {_vol_for_oi:,} 充足）"})
     else:
         items.append({"key": "oi", "label": "未平倉量 OI", "status": "❌",
                       "detail": f"{oi:,}（過低，難出場）"})
@@ -793,7 +798,9 @@ def label_contract(row, option_type: str = "call") -> str:
     給單一合約打上一個主要標籤，**每口都有明確分類**。
 
     優先序（由上往下優先）：
-      1. ❓ 流動性差  (OI < 100)            → 排除：想出場沒人接
+      1. ❓ 流動性差  (OI < 100 且 今日量 < 20)  → 排除：想出場沒人接
+         （yfinance 的 openInterest 常 lag 1-2 天甚至回傳 0，
+           因此加上 volume 作 fallback：只要今日有人交易就不算流動性差）
       2. 💀 Theta 黑洞 (DTE < 14)            → 排除：時間損耗太快
       3. 🔥 高 IV     (IV > 50%)             → 注意：進場貴、IV crush 風險
       4. Delta 分級：
@@ -807,10 +814,16 @@ def label_contract(row, option_type: str = "call") -> str:
     delta = abs(row.get("delta", 0)) if pd.notna(row.get("delta")) else 0
     dte = row.get("dte", 0)
     iv = row.get("impliedVolatility", 0) or 0
-    oi = row.get("openInterest", 0) or 0
+    # OI / volume 可能為 NaN，安全轉成 int
+    _oi_raw = row.get("openInterest", 0)
+    oi = int(_oi_raw) if pd.notna(_oi_raw) else 0
+    _vol_raw = row.get("volume", 0)
+    vol = int(_vol_raw) if pd.notna(_vol_raw) else 0
 
     # 先排除地雷（無法繼續看）
-    if oi < 100:
+    # yfinance 的 openInterest 常常 lag 一天或直接回 0，單看 OI 會誤殺熱門合約
+    # → 同時要求「OI 低 *且* 今日量也低」才視為流動性差
+    if oi < 100 and vol < 20:
         return "❓ 流動性差"
     if dte < 14:
         return "💀 Theta 黑洞"
