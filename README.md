@@ -304,40 +304,48 @@ streamlit run us_screener_ui.py
 ```
 你的專案資料夾/
 │
-├── us_screener_ui.py           # 主程式(Streamlit 介面,~1850 行)
-├── fetch_cache_us.py           # 每天抓股價 + 從 Releases 同步最新版
-├── fetch_iv_history.py         # 每天抓 IV snapshot 累積歷史
-├── options_data.py             # 期權所有功能 + 快取 + 重試 + IV 反推(~1400 行)
-├── 期權新手指南.md             # 新手教學內容
-├── requirements.txt            # Python 套件清單
-├── README.md                   # 你正在看的這個
+├── us_screener_ui.py            # 主程式(Streamlit 介面,~1900 行)
+├── fetch_cache_us.py            # 每天抓股價 + 從 Releases 同步最新版
+├── fetch_iv_history.py          # 每天抓 IV snapshot 累積歷史
+├── fetch_option_snapshots.py    # 每天美股盤中抓 WATCHLIST 全鏈快照(ATM ±20%)
+├── options_data.py              # 期權所有功能 + 6 層 fallback + IV 反推(~1450 行)
+├── 期權新手指南.md              # 新手教學內容
+├── 本次工作摘要_期權與雲端部署.md  # 完整開發歷程(Day 1-3+ 累積)
+├── requirements.txt             # Python 套件清單
+├── README.md                    # 你正在看的這個
 ├── .gitignore
 │
 ├── .github/workflows/
-│   ├── fetch.yml               # 每天 5:30 自動抓股價
-│   └── fetch_iv.yml            # 每天 5:45 自動抓 IV
+│   ├── fetch.yml                # 每天 5:30 自動抓股價(UTC 21:30)
+│   ├── fetch_iv.yml             # 每天 5:45 自動抓 IV(UTC 21:45)
+│   └── fetch_chains.yml         # 每天 03:00 抓期權鏈快照(UTC 19:00=美股盤中)
 │
 ├── .streamlit/
-│   └── secrets.toml            # 雲端要設的 secret(PARQUET_URL)
+│   └── secrets.toml             # 雲端要設的 secret(PARQUET_URL)
 │
-├── cache/                      # 自動產生
-│   ├── us_daily.parquet        # 股價快取
-│   ├── iv_history.parquet      # IV 歷史
-│   └── options/                # 期權鏈磁碟快取(2026-06-01 新增)
+├── cache/                       # 自動產生
+│   ├── us_daily.parquet         # 股價快取
+│   ├── iv_history.parquet       # IV 歷史(45 檔逐日累積)
+│   ├── options/                 # 期權鏈磁碟快取(24h 新鮮窗口)
+│   │   └── {ticker}_{exp}.parquet
+│   └── option_snapshots/        # 每日全鏈快照(45 檔,盤中抓)
+│       └── {ticker}.parquet
 │
-├── scans/                      # 每次掃描的快照(給回測用)
-└── positions/                  # 你的持倉 JSON(本機才有)
+├── scans/                       # 每次掃描的快照(給回測用)
+└── positions/                   # 你的持倉 JSON(本機才有)
 ```
 
 各檔案在做什麼:
 
 | 檔案 | 行數 | 做什麼 |
 |------|------|--------|
-| `us_screener_ui.py` | ~1850 | 整個 App 的介面 + 選股邏輯 + 持倉 + 回測 + 期權教學/瀏覽/分析 |
-| `options_data.py` | ~1400 | 所有跟期權有關的計算(Greeks、標籤、IV Rank、財報、磁碟快取、API 客戶端) |
-| `fetch_cache_us.py` | ~310 | 從 Wikipedia 抓成分股名單,從 yfinance 抓股價,從 Releases 同步舊版 |
-| `fetch_iv_history.py` | ~130 | 每天抓 45 檔的 IV 快照,累積成 IV 歷史 |
-| `期權新手指南.md` | ~280 | 新手讀的完整教學 |
+| `us_screener_ui.py` | ~1900 | 整個 App 的介面 + 選股邏輯 + 持倉 + 回測 + 期權教學/瀏覽/分析 + 4 個頁籤 |
+| `options_data.py` | ~1450 | 所有跟期權有關的計算(BS Greeks、智能標籤、IV/RV Rank、財報、磁碟快取、全鏈快照 fallback、IV drift 偵測、IV 反推、API 客戶端) |
+| `fetch_cache_us.py` | ~310 | 從 Wikipedia 抓成分股(SP500/NDX/SP400/SOX) + 80 檔 ETF + yfinance 增量下載 + 從 Releases 同步舊版 |
+| `fetch_iv_history.py` | ~130 | 每天抓 45 檔的 ATM IV 快照,累積成 IV 歷史(供 IV Rank 計算) |
+| `fetch_option_snapshots.py` | ~140 | 每天**美股盤中**抓 45 檔的全鏈快照(60 天內到期 × ATM ±20%),雲端 yfinance 失敗時 fallback 用 |
+| `期權新手指南.md` | ~280 | 新手讀的完整教學(10 章) |
+| `本次工作摘要_期權與雲端部署.md` | ~400+ | 從本機到雲端、從零做出期權工具的完整開發紀錄 |
 
 ---
 
@@ -346,15 +354,18 @@ streamlit run us_screener_ui.py
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  GitHub Actions(GitHub 提供的免費「定時跑程式」服務)    │
-│  ├─ 每天 5:30 跑 fetch_cache_us.py(抓股價)             │
+│  ├─ 每天 5:30 跑 fetch_cache_us.py(抓 ~1000 檔股價)    │
 │  │   └─ 2026-06-01 起:跑前先從 Releases 拉最新 parquet  │
 │  │      (修「每次都 18 天未更新」bug)                  │
-│  └─ 每天 5:45 跑 fetch_iv_history.py(抓 IV)            │
+│  ├─ 每天 5:45 跑 fetch_iv_history.py(抓 45 檔 IV)      │
+│  └─ 每天 03:00 跑 fetch_option_snapshots.py             │
+│      (美股盤中 UTC 19:00,抓真實 Bid/Ask 全鏈快照)     │
 │       │                                                   │
 │       ▼                                                   │
-│  GitHub Releases(免費檔案託管)                          │
-│  ├─ us_daily.parquet      ~1,000 檔股價 / 1 年            │
-│  └─ iv_history.parquet    45 檔 IV 累積                   │
+│  GitHub Releases tag=data-cache(免費檔案託管)          │
+│  ├─ us_daily.parquet         ~1,000 檔股價 / 1 年         │
+│  ├─ iv_history.parquet       45 檔 IV 逐日累積            │
+│  └─ option_snapshots.tar.gz  45 檔全鏈快照(ATM ±20%)     │
 └─────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -362,9 +373,12 @@ streamlit run us_screener_ui.py
 │  Streamlit Community Cloud(免費網站託管)               │
 │  └─ 跑 us_screener_ui.py                                 │
 │     ├─ 啟動時自動從 PARQUET_URL 抓最新 parquet           │
+│     ├─ 也自動下載 option_snapshots.tar.gz 解壓備用      │
 │     ├─ 持倉存在記憶體 + 手動 JSON 備份                   │
-│     ├─ 期權鏈:磁碟快取 → yfinance → 過期 fallback       │
-│     └─ 用戶看到的 Web UI                                 │
+│     ├─ 期權鏈 6 層 fallback:                             │
+│     │   1. 記憶體(10min) → 2. 磁碟(24h) → 3. yfinance   │
+│     │   → 4. 📸 背景快照 → 5. 過期磁碟 → 6. 報錯         │
+│     └─ 用戶看到的 Web UI(主畫面 + 4 頁籤)              │
 └─────────────────────────────────────────────────────────┘
 ```
 
