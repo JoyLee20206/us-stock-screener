@@ -2,8 +2,10 @@ name: Daily Option Chains Snapshot
 
 on:
   schedule:
-    # UTC 22:00 = 台灣時間次日 06:00（在股價 + IV 抓取之後）
-    - cron: '0 22 * * 1-5'
+    # UTC 19:00 = 美股盤中 15:00 EDT（夏令）/ 14:00 EST（冬令）
+    # 距收盤還 1-2 小時，能抓到真實 Bid/Ask，避開盤後 $0 報價問題。
+    # 對應台灣時間：03:00 AM
+    - cron: '0 19 * * 1-5'
   workflow_dispatch:
 
 jobs:
