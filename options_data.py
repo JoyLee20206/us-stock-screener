@@ -1020,6 +1020,7 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
         return df_c.copy(), df_p.copy()
 
     # 1. MarketData.app 優先
+    md_error = None
     if _MD_AVAILABLE:
         tr = _md_option_chain(ticker, expiration)
         if tr is not None:
@@ -1027,14 +1028,21 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
             if not df_call.empty or not df_put.empty:
                 _cache_set(_chain_cache, key, (df_call, df_put))
                 return df_call.copy(), df_put.copy()
+        md_error = _MD_LAST_ERROR  # 留著 fallback 失敗時一起回報
 
     # 2. yfinance fallback
-    tk = _ticker(ticker)
-    chain = tk.option_chain(expiration)
-    df_call = chain.calls.copy()
-    df_put = chain.puts.copy()
-    _cache_set(_chain_cache, key, (df_call, df_put))
-    return df_call.copy(), df_put.copy()
+    try:
+        tk = _ticker(ticker)
+        chain = tk.option_chain(expiration)
+        df_call = chain.calls.copy()
+        df_put = chain.puts.copy()
+        _cache_set(_chain_cache, key, (df_call, df_put))
+        return df_call.copy(), df_put.copy()
+    except Exception as e:
+        # 雙來源都失敗 → 把兩個原因一起丟出來方便診斷
+        if md_error:
+            raise RuntimeError(f"MarketData：{md_error}；yfinance：{type(e).__name__}: {e}") from e
+        raise
 
 
 # ============================================================
