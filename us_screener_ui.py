@@ -114,18 +114,27 @@ def _sync_option_snapshots_from_release(release_base: str) -> int:
     snapshot_dir = Path("cache/option_snapshots")
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
-    # 推導 tarball URL：把 us_daily.parquet 換成 option_snapshots.tar.gz
-    tar_url = release_base.replace("us_daily.parquet", "option_snapshots.tar.gz")
+    # 推導 tarball URL：將最後一段路徑換成 option_snapshots.tar.gz
+    # 比 .replace 更穩，PARQUET_URL 不一定要含 'us_daily.parquet' 字串
+    if "/" in release_base:
+        tar_url = release_base.rsplit("/", 1)[0] + "/option_snapshots.tar.gz"
+    else:
+        tar_url = release_base.replace("us_daily.parquet", "option_snapshots.tar.gz")
+
     try:
         resp = requests.get(tar_url, timeout=60)
         resp.raise_for_status()
         tmp_tar = Path("/tmp" if Path("/tmp").exists() else ".") / "_snap.tar.gz"
         tmp_tar.write_bytes(resp.content)
         with tarfile.open(tmp_tar, "r:gz") as tar:
-            # 安全解壓到 cache/
+            # 安全解壓到 cache/（filter='data' 是 Python 3.12+ 要求，避免 path 攻擊）
             for m in tar.getmembers():
                 if m.name.startswith("option_snapshots/") and m.name.endswith(".parquet"):
-                    tar.extract(m, "cache")
+                    try:
+                        tar.extract(m, "cache", filter="data")
+                    except TypeError:
+                        # Python 3.11 沒有 filter 參數 → 退回舊呼叫
+                        tar.extract(m, "cache")
         try:
             tmp_tar.unlink()
         except Exception:

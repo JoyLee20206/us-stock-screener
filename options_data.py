@@ -974,6 +974,9 @@ def recommend_for_tickers(tickers: list[str], target_dte: int = 30,
                "盈虧平衡": None, "距現價%": None, "備註": ""}
         try:
             exps = list_expirations(sid)
+            # 雲端 yfinance 失敗 → 試背景快照
+            if not exps:
+                exps = snapshot_available_expirations(sid)
             if not exps:
                 out["備註"] = "無期權"
                 results.append(out)
@@ -1173,6 +1176,9 @@ def find_post_earnings_expiration(ticker: str, target_dte_after: int = 14) -> st
     """
     next_earn = get_next_earnings(ticker)
     exps = list_expirations(ticker)
+    # fallback：yfinance 失敗（雲端常見）時用背景快照的到期日清單
+    if not exps:
+        exps = snapshot_available_expirations(ticker)
     if not exps:
         return None
 
@@ -1267,6 +1273,20 @@ def list_expirations(ticker: str) -> list[str]:
 def last_expirations_error(ticker: str) -> str | None:
     """取得最近一次 list_expirations(ticker) 的失敗原因（沒失敗時回 None）"""
     return _last_expirations_error.get(ticker)
+
+
+def _snapshot_spot_price(ticker: str) -> float | None:
+    """從背景快照取出 `_spot_at_snapshot`（雲端 yfinance 限流時的 fallback）"""
+    p = _snapshot_path(ticker)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        if "_spot_at_snapshot" in df.columns and not df.empty:
+            return float(df["_spot_at_snapshot"].iloc[0])
+    except Exception:
+        pass
+    return None
 
 
 def get_spot_price(ticker: str) -> float | None:
@@ -1598,6 +1618,9 @@ def build_buyer_view(ticker: str, expiration: str,
     """
     if spot_price is None:
         spot_price = get_spot_price(ticker)
+    # fallback：yfinance 失敗（雲端常見）時用背景快照保存的現價
+    if spot_price is None:
+        spot_price = _snapshot_spot_price(ticker)
     if spot_price is None:
         return {"error": f"無法取得 {ticker} 現價"}
 
