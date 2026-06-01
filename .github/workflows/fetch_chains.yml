@@ -1,0 +1,57 @@
+name: Daily Option Chains Snapshot
+
+on:
+  schedule:
+    # UTC 22:00 = 台灣時間次日 06:00（在股價 + IV 抓取之後）
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  fetch_chains:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download existing snapshots from Releases (if exists)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        run: |
+          mkdir -p cache/option_snapshots
+          gh release download data-cache --pattern "option_snapshots.tar.gz" --dir /tmp 2>/dev/null && \
+            tar -xzf /tmp/option_snapshots.tar.gz -C cache/ || \
+            echo "尚無 option_snapshots，首次執行將建立"
+
+      - name: Run fetch_option_snapshots.py
+        run: python fetch_option_snapshots.py
+
+      - name: Package & upload snapshots to Releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 打包整個 option_snapshots 資料夾為 tar.gz（避免 release 太多檔案）
+          tar -czf option_snapshots.tar.gz -C cache option_snapshots/
+
+          gh release view data-cache 2>/dev/null || \
+            gh release create data-cache \
+              --title "Stock Data Cache" \
+              --notes "每日由 GitHub Actions 自動更新" \
+              --latest=false
+
+          gh release upload data-cache option_snapshots.tar.gz --clobber
+
+          echo "✅ 期權快照上傳完成：$(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "📦 檔案大小：$(du -h option_snapshots.tar.gz | cut -f1)"
