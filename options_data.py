@@ -14,12 +14,137 @@ options_data.py — 美股期權鏈抓取 + Black-Scholes Greeks + 智能標籤
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
+
+# ============================================================
+# MarketData.app API（主要資料源，避開 Yahoo 對共用 IP 的限流）
+#   1. 註冊 https://www.marketdata.app/
+#   2. Dashboard 點 Generate Token → 信箱收 token
+#   3. 設 env var MARKETDATA_TOKEN（Streamlit Cloud → Settings → Secrets）
+#   免費版自動走 cached 端點（15 分鐘延遲），對選股完全夠用。
+# ============================================================
+MARKETDATA_TOKEN = os.environ.get("MARKETDATA_TOKEN", "").strip()
+MARKETDATA_BASE = "https://api.marketdata.app/v1"
+# 免費版沒 OPRA entitlement → 必須用 cached feed。付費後可改成 "live"。
+MARKETDATA_FEED = os.environ.get("MARKETDATA_FEED", "cached").strip()
+_MD_AVAILABLE = bool(MARKETDATA_TOKEN)
+_MD_LAST_ERROR: str | None = None
+
+
+def _md_get(path: str, params: dict | None = None) -> dict | None:
+    """共用 GET 包裝；失敗回 None，原因留在 _MD_LAST_ERROR"""
+    global _MD_LAST_ERROR
+    if not _MD_AVAILABLE:
+        return None
+    try:
+        params = dict(params or {})
+        # cached feed 是免費版必要參數；MarketData 的 chain/quote 都吃 feed
+        params.setdefault("feed", MARKETDATA_FEED)
+        resp = requests.get(
+            f"{MARKETDATA_BASE}{path}",
+            headers={"Authorization": f"Bearer {MARKETDATA_TOKEN}",
+                     "Accept": "application/json"},
+            params=params,
+            timeout=15,
+        )
+        # 203 = cached data（免費版正常狀態）；200 = live；其它都是失敗
+        if resp.status_code not in (200, 203):
+            _MD_LAST_ERROR = f"HTTP {resp.status_code}: {resp.text[:160]}"
+            return None
+        j = resp.json()
+        # API 慣例：s == "ok" 或 "no_data" 才是正常回應
+        if j.get("s") == "error":
+            _MD_LAST_ERROR = f"API error: {j.get('errmsg', '')[:160]}"
+            return None
+        _MD_LAST_ERROR = None
+        return j
+    except Exception as e:
+        _MD_LAST_ERROR = f"{type(e).__name__}: {e}"
+        return None
+
+
+def marketdata_status() -> str:
+    if not MARKETDATA_TOKEN:
+        return "未設定 MARKETDATA_TOKEN（純 yfinance 模式）"
+    if _MD_LAST_ERROR:
+        return f"已啟用（feed={MARKETDATA_FEED}）但最近一次呼叫失敗：{_MD_LAST_ERROR}"
+    return f"已啟用（feed={MARKETDATA_FEED}）"
+
+
+def _md_list_expirations(ticker: str) -> list[str] | None:
+    """GET /v1/options/expirations/{ticker}/"""
+    j = _md_get(f"/options/expirations/{ticker}/")
+    if j is None:
+        return None
+    if j.get("s") == "no_data":
+        return []
+    exps = j.get("expirations")
+    if not exps:
+        return []
+    return list(exps)
+
+
+def _md_option_chain(ticker: str, expiration: str
+                     ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    """
+    GET /v1/options/chain/{ticker}/?expiration=YYYY-MM-DD
+
+    MarketData 回傳是 column-oriented：每個欄位是 list。
+    """
+    j = _md_get(f"/options/chain/{ticker}/", {"expiration": expiration})
+    if j is None:
+        return None
+    if j.get("s") == "no_data":
+        return pd.DataFrame(), pd.DataFrame()
+
+    # 必要欄位（缺哪個就略過該筆）
+    sides = j.get("side") or []
+    strikes = j.get("strike") or []
+    n = len(strikes)
+    if n == 0:
+        return pd.DataFrame(), pd.DataFrame()
+
+    def col(name, default=0):
+        v = j.get(name)
+        return v if (v and len(v) == n) else [default] * n
+
+    df = pd.DataFrame({
+        "strike": [float(x or 0) for x in strikes],
+        "lastPrice": [float(x or 0) for x in col("last")],
+        "bid": [float(x or 0) for x in col("bid")],
+        "ask": [float(x or 0) for x in col("ask")],
+        "volume": [int(x or 0) for x in col("volume")],
+        "openInterest": [int(x or 0) for x in col("openInterest")],
+        "impliedVolatility": [float(x or 0) for x in col("iv")],
+        "contractSymbol": col("optionSymbol", ""),
+        "option_type": [str(s or "").lower() for s in sides],
+    })
+    if df.empty:
+        return df, df
+    df_call = df[df["option_type"] == "call"].drop(columns=["option_type"]).reset_index(drop=True)
+    df_put = df[df["option_type"] == "put"].drop(columns=["option_type"]).reset_index(drop=True)
+    return df_call, df_put
+
+
+def _md_spot(ticker: str) -> float | None:
+    """GET /v1/stocks/quotes/{ticker}/"""
+    j = _md_get(f"/stocks/quotes/{ticker}/")
+    if j is None or j.get("s") == "no_data":
+        return None
+    last = j.get("last")
+    if not last:
+        return None
+    try:
+        return float(last[0])
+    except Exception:
+        return None
 
 # ============================================================
 # 反 rate-limit：用 curl_cffi 偽裝成真實 Chrome
@@ -745,24 +870,38 @@ _last_expirations_error: dict[str, str] = {}  # ticker → 最近一次失敗原
 
 
 def list_expirations(ticker: str) -> list[str]:
-    """回傳該標的可選到期日清單（按時間排序）。失敗原因留在 _last_expirations_error[ticker]。
-    10 分鐘 TTL 快取，避免重複打 yfinance 被 rate limit。"""
+    """回傳該標的可選到期日清單。Tradier 優先、yfinance fallback。10 分鐘 TTL 快取。"""
     cached = _cache_get(_exp_cache, ticker)
     if cached is not None:
         _last_expirations_error.pop(ticker, None)
         return cached
+
+    # 1. MarketData.app 優先
+    if _MD_AVAILABLE:
+        exps = _md_list_expirations(ticker)
+        if exps:
+            _cache_set(_exp_cache, ticker, exps)
+            _last_expirations_error.pop(ticker, None)
+            return exps
+        # MarketData 失敗 → 繼續 fallback 到 yfinance
+
+    # 2. yfinance fallback
     try:
         tk = _ticker(ticker)
-        exps = tk.options  # 屬性存取會打 API
+        exps = tk.options
         if not exps:
-            _last_expirations_error[ticker] = "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）"
+            md_note = f"；MarketData 也失敗：{_MD_LAST_ERROR}" if (_MD_AVAILABLE and _MD_LAST_ERROR) else ""
+            _last_expirations_error[ticker] = (
+                "yfinance 回傳空到期日清單（可能 rate limit、無期權或暫時 API 異常）" + md_note
+            )
             return []
         result = list(exps)
         _cache_set(_exp_cache, ticker, result)
         _last_expirations_error.pop(ticker, None)
         return result
     except Exception as e:
-        _last_expirations_error[ticker] = f"{type(e).__name__}: {e}"
+        md_note = f"；MarketData 也失敗：{_MD_LAST_ERROR}" if (_MD_AVAILABLE and _MD_LAST_ERROR) else ""
+        _last_expirations_error[ticker] = f"{type(e).__name__}: {e}{md_note}"
         return []
 
 
@@ -772,7 +911,13 @@ def last_expirations_error(ticker: str) -> str | None:
 
 
 def get_spot_price(ticker: str) -> float | None:
-    """抓即時/最新收盤價"""
+    """抓即時/最新收盤價。MarketData 優先、yfinance fallback。"""
+    # 1. MarketData.app
+    if _MD_AVAILABLE:
+        price = _md_spot(ticker)
+        if price and price > 0:
+            return price
+    # 2. yfinance fallback
     try:
         tk = _ticker(ticker)
         hist = tk.history(period="5d")
@@ -785,7 +930,7 @@ def get_spot_price(ticker: str) -> float | None:
 
 def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    抓取指定到期日的 Call + Put 鏈（10 分鐘 TTL 快取避免 rate limit）
+    抓取指定到期日的 Call + Put 鏈。Tradier 優先、yfinance fallback。10 分鐘 TTL 快取。
 
     Returns:
         (df_call, df_put)：兩個 DataFrame，欄位包含
@@ -796,6 +941,17 @@ def fetch_option_chain(ticker: str, expiration: str) -> tuple[pd.DataFrame, pd.D
     if cached is not None:
         df_c, df_p = cached
         return df_c.copy(), df_p.copy()
+
+    # 1. MarketData.app 優先
+    if _MD_AVAILABLE:
+        tr = _md_option_chain(ticker, expiration)
+        if tr is not None:
+            df_call, df_put = tr
+            if not df_call.empty or not df_put.empty:
+                _cache_set(_chain_cache, key, (df_call, df_put))
+                return df_call.copy(), df_put.copy()
+
+    # 2. yfinance fallback
     tk = _ticker(ticker)
     chain = tk.option_chain(expiration)
     df_call = chain.calls.copy()
